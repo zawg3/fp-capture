@@ -6,8 +6,7 @@ Static Laylo fingerprint capture page.
 
 ## Deploy
 
-GitHub Pages → **Deploy from a branch** → `main` / `/docs`.
+1. Repo **Settings → Pages → Source** = **GitHub Actions**
+2. Actions → **Deploy Pages** → **Run workflow** (or push to `main`)
 
-No Actions workflow. Push to `main` and the site updates in ~1 minute.
-
-Do **not** set Source to "GitHub Actions" — that queues behind environment approvals.
+If the run sits on **Waiting**, open it → **Review deployments** → **Approve**.
