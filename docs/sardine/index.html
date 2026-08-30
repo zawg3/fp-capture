@@ -90,6 +90,25 @@ async function computeSessionKey(epsSid, unixSeconds) {
   return btoa(bin);
 }
 
+async function decodeSardineWire(buf) {
+  let ab = buf;
+  if (buf instanceof Blob) ab = await buf.arrayBuffer();
+  else if (ArrayBuffer.isView(buf)) ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+  const u8 = new Uint8Array(ab);
+  const gz = new Uint8Array(u8.length);
+  for (let i = 0; i < u8.length; i++) gz[i] = (u8[i] ^ i) & 0xff;
+  const ds = new DecompressionStream("gzip");
+  const out = await new Response(new Blob([gz]).stream().pipeThrough(ds)).arrayBuffer();
+  return JSON.parse(new TextDecoder().decode(out));
+}
+
+function fakeEventsResponse() {
+  return JSON.stringify({
+    deviceId: crypto.randomUUID ? crypto.randomUUID() : "fp-capture-local",
+    deviceToken: "capture-" + Math.random().toString(36).slice(2),
+  });
+}
+
 function payloadToMap(entries) {
   const m = {};
   if (!Array.isArray(entries)) return m;
@@ -202,16 +221,45 @@ async function pingWebhooks(payload) {
 
 const set = (h) => { document.getElementById("status").innerHTML = h; };
 
-function isBlockedTelemetry(url) {
+function isSentry(url) {
+  return /sentry\.io|ingest\.sentry/i.test(String(url || ""));
+}
+
+function isSardineHost(url) {
+  return /(?:^|\.)sardine\.ai/i.test(String(url || ""))
+    || /live-harbor\.com/i.test(String(url || ""));
+}
+
+function isEventsUpload(method, url) {
+  return String(method || "GET").toUpperCase() === "POST"
+    && /\/v1\/events(?:\/|$|\?)/i.test(String(url || ""))
+    && isSardineHost(url);
+}
+
+function isBlockedUpload(url) {
   const u = String(url || "");
-  return /sentry\.io/i.test(u) || /ingest\.sentry/i.test(u);
+  if (isSentry(u)) return true;
+  if (isSardineHost(u) && /\/v1\//i.test(u)) return true;
+  if (/p\.live-harbor\.com/i.test(u)) return true;
+  return false;
 }
 
 function onEventsCaptured(obj) {
-  if (!obj || !Array.isArray(obj.payload) || obj.payload.length < 20) return;
+  if (!obj || typeof obj !== "object") return;
+  const pl = obj.payload;
+  if (!Array.isArray(pl) || pl.length < 8) return;
   window.__sardineLastEvents = obj;
   if (typeof window.__sardineOnCapture === "function") {
     window.__sardineOnCapture(obj);
+  }
+}
+
+async function swallowEventsUpload(body) {
+  if (!body) return;
+  try {
+    onEventsCaptured(await decodeSardineWire(body));
+  } catch (e) {
+    console.warn("[sardine-capture] wire decode failed", e);
   }
 }
 
@@ -219,7 +267,6 @@ function installNetworkIsolation() {
   if (networkIsolationInstalled) return;
   networkIsolationInstalled = true;
 
-  // Same-origin collector iframe (frame.html) → postMessage back here.
   window.addEventListener("message", (e) => {
     if (e.origin !== location.origin) return;
     if (e.data && e.data.type === "sardine-capture" && e.data.data) {
@@ -227,15 +274,19 @@ function installNetworkIsolation() {
     }
   });
 
-  // Redirect Sardine collector iframe to our hooked same-origin frame.
+  const _stringify = JSON.stringify;
+  JSON.stringify = function (value, ...rest) {
+    if (value && typeof value === "object" && Array.isArray(value.payload)) {
+      onEventsCaptured(value);
+    }
+    return _stringify.apply(this, [value, ...rest]);
+  };
+
   const frameSrcDesc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, "src");
   if (frameSrcDesc && frameSrcDesc.set) {
     Object.defineProperty(HTMLIFrameElement.prototype, "src", {
       set(v) {
-        const s = String(v || "");
-        if (/live-harbor\.com/i.test(s) && /collector/i.test(s)) {
-          v = COLLECTOR_FRAME;
-        }
+        v = redirectCollectorFrameSrc(v);
         frameSrcDesc.set.call(this, v);
       },
       get() { return frameSrcDesc.get.call(this); },
@@ -243,32 +294,32 @@ function installNetworkIsolation() {
     });
   }
 
-  const _createElement = document.createElement.bind(document);
-  document.createElement = function (tag, opts) {
-    const el = _createElement(tag, opts);
-    if (String(tag).toLowerCase() === "iframe") {
-      el.addEventListener("load", () => {
-        const src = el.src || el.getAttribute("src") || "";
-        if (src.includes("frame.html") && el.contentWindow) {
-          try { el.contentWindow.focus(); } catch { /* ignore */ }
-        }
-      });
+  function redirectCollectorFrameSrc(v) {
+    const s = String(v || "");
+    if (/collector/i.test(s) && (isSardineHost(s) || /live-harbor\.com/i.test(s))) {
+      return COLLECTOR_FRAME;
     }
-    return el;
+    return v;
+  }
+
+  const _setAttribute = Element.prototype.setAttribute;
+  Element.prototype.setAttribute = function (name, value) {
+    if (String(this.tagName).toUpperCase() === "IFRAME" && String(name).toLowerCase() === "src") {
+      value = redirectCollectorFrameSrc(value);
+    }
+    return _setAttribute.call(this, name, value);
   };
 
-  // Block loader Sentry noise (429s) and any stray harbor POST from parent context.
   const origFetch = window.fetch.bind(window);
   window.fetch = async function (input, init) {
     const url = typeof input === "string" ? input : (input && input.url) || "";
-    if (isBlockedTelemetry(url)) {
+    const method = ((init && init.method) || "GET").toUpperCase();
+    if (isSentry(url) || isBlockedUpload(url)) {
       return new Response("", { status: 204 });
     }
-    if (((init && init.method) || "GET").toUpperCase() === "POST" && /live-harbor\.com\/v1\/events/i.test(url)) {
-      return new Response(JSON.stringify({ deviceId: "fp-capture-local", deviceToken: "" }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
+    if (isEventsUpload(method, url)) {
+      if (init && init.body) await swallowEventsUpload(init.body);
+      return new Response(fakeEventsResponse(), { status: 200, headers: { "content-type": "application/json" } });
     }
     return origFetch(input, init);
   };
@@ -282,26 +333,40 @@ function installNetworkIsolation() {
   };
   XMLHttpRequest.prototype.send = function (body) {
     const url = this.__capUrl || "";
-    if (isBlockedTelemetry(url) || (this.__capMethod === "POST" && /live-harbor\.com\/v1\/events/i.test(url))) {
-      const xhr = this;
-      queueMicrotask(() => {
-        Object.defineProperty(xhr, "readyState", { configurable: true, value: 4 });
-        Object.defineProperty(xhr, "status", { configurable: true, value: this.__capMethod === "POST" ? 200 : 204 });
-        Object.defineProperty(xhr, "responseText", {
-          configurable: true,
-          value: this.__capMethod === "POST" ? JSON.stringify({ deviceId: "fp-capture-local", deviceToken: "" }) : "",
-        });
-        xhr.onreadystatechange && xhr.onreadystatechange();
-        xhr.onload && xhr.onload();
-      });
+    const xhr = this;
+    if (isSentry(url) || isBlockedUpload(url)) {
+      queueMicrotask(finishXhr);
+      return;
+    }
+    if (isEventsUpload(this.__capMethod, url)) {
+      swallowEventsUpload(body).finally(finishXhr);
       return;
     }
     return xhrSend.call(this, body);
+
+    function finishXhr() {
+      Object.defineProperty(xhr, "readyState", { configurable: true, value: 4 });
+      Object.defineProperty(xhr, "status", { configurable: true, value: isEventsUpload(xhr.__capMethod, url) ? 200 : 204 });
+      Object.defineProperty(xhr, "responseText", {
+        configurable: true,
+        value: isEventsUpload(xhr.__capMethod, url) ? fakeEventsResponse() : "",
+      });
+      xhr.onreadystatechange && xhr.onreadystatechange();
+      xhr.onload && xhr.onload();
+    }
   };
+
+  if (navigator.sendBeacon) {
+    const _beacon = navigator.sendBeacon.bind(navigator);
+    navigator.sendBeacon = function (url, data) {
+      if (isSardineHost(url) || isSentry(url)) return true;
+      return _beacon(url, data);
+    };
+  }
 
   const OrigWS = window.WebSocket;
   window.WebSocket = function (url, protocols) {
-    if (/live-harbor\.com/i.test(String(url))) {
+    if (isSardineHost(url)) {
       return {
         readyState: 1,
         send() {},
@@ -313,6 +378,9 @@ function installNetworkIsolation() {
     return new OrigWS(url, protocols);
   };
 }
+
+// Block Sardine/Sentry before loader script ever runs.
+installNetworkIsolation();
 
 function loadLoader() {
   return new Promise((resolve, reject) => {
@@ -343,7 +411,6 @@ function loadLoader() {
 }
 
 async function runCollector() {
-  installNetworkIsolation();
   await loadLoader();
 
   const epsSid = randomHex(32);
