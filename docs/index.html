@@ -3,252 +3,42 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>Laylo FP Capture</title>
+  <title>FP Capture</title>
   <style>
     :root { color-scheme: dark; }
     body { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
            margin: 0; padding: 20px 16px 60px; background: #0b0f14; color: #e6edf3; }
     h1 { font-size: 17px; margin: 0 0 4px; }
-    .sub { color: #7d8590; font-size: 12px; margin: 0 0 20px; line-height: 1.5; }
-    .row { display: flex; gap: 8px; margin-top: 10px; }
-    button { flex: 1; padding: 16px 12px; font-size: 15px; font-weight: 600;
-             border: 0; border-radius: 10px; background: #2f81f7; color: #fff;
-             font-family: inherit; -webkit-appearance: none; }
-    button.secondary { background: #21262d; color: #e6edf3; }
-    button:active { filter: brightness(0.92); }
-    button[disabled] { background: #30363d; color: #7d8590; }
-    #go { width: 100%; flex: none; padding: 18px; font-size: 17px; }
-    #status { font-size: 13px; margin: 16px 0; min-height: 20px; line-height: 1.5; }
-    .ok { color: #3fb950; } .warn { color: #d29922; } .err { color: #f85149; }
-    table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 12px 0; }
-    td { padding: 5px 6px; border-bottom: 1px solid #21262d; vertical-align: top; }
-    td:first-child { color: #7d8590; width: 34%; }
-    td:last-child { word-break: break-all; }
-    pre { background: #161b22; padding: 12px; overflow: auto; border-radius: 8px;
-          font-size: 10px; white-space: pre-wrap; word-break: break-all; color: #8b949e; }
-    label { display: block; font-size: 11px; color: #7d8590; margin: 12px 0 4px; }
-    input[type=text] { width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 8px;
-      border: 1px solid #30363d; background: #161b22; color: #e6edf3; font: inherit; font-size: 12px; }
+    .sub { color: #7d8590; font-size: 12px; margin: 0 0 24px; line-height: 1.5; }
+    .cards { display: flex; flex-direction: column; gap: 12px; max-width: 520px; }
+    a.card { display: block; padding: 16px 18px; border-radius: 10px; background: #161b22;
+             border: 1px solid #30363d; color: inherit; text-decoration: none; }
+    a.card:hover { border-color: #58a6ff; }
+    a.card h2 { font-size: 15px; margin: 0 0 6px; color: #e6edf3; }
+    a.card p { font-size: 12px; margin: 0; color: #7d8590; line-height: 1.45; }
+    .tag { display: inline-block; font-size: 10px; padding: 2px 6px; border-radius: 4px;
+           margin-right: 6px; font-weight: 600; }
+    .tag.laylo { background: #1f3a5f; color: #58a6ff; }
+    .tag.sardine { background: #1a3d2a; color: #3fb950; }
   </style>
 </head>
 <body>
-  <h1>Laylo fingerprint capture</h1>
-  <p class="sub">Runs Laylo's exact client fingerprint (<code>b9()</code>). Works offline /
-     on GitHub Pages — no local network needed. Tap Capture, then Copy or Download
-     the JSON and send it back.</p>
+  <h1>Browser fingerprint collectors</h1>
+  <p class="sub">Static GitHub Pages tools — tap a collector, run once on your machine,
+     then Copy / Download / auto-send via webhook.</p>
 
-  <button id="go">Capture fingerprint</button>
-  <div class="row" id="actions" hidden>
-    <button class="secondary" id="copy" type="button">Copy JSON</button>
-    <button class="secondary" id="dl" type="button">Download .json</button>
+  <div class="cards">
+    <a class="card" href="fp/">
+      <h2><span class="tag laylo">Laylo</span> FP capture</h2>
+      <p>Laylo signup canvas / WebGL vendor hash / live AudioContext fingerprint
+         (<code>b9()</code> bundle). For Laylo bot parity.</p>
+    </a>
+    <a class="card" href="sardine/">
+      <h2><span class="tag sardine">Sardine</span> probe capture</h2>
+      <p>Ticketmaster Sardine collector probes: OfflineAudioContext sum + WebGL PNG
+         <code>sha512</code> image hash. Send one capture per GPU — builds our
+         <code>probe_bank.json</code> library.</p>
+    </a>
   </div>
-
-  <label for="webhook">Optional webhook (Discord / webhook.site) — leave blank to skip</label>
-  <input id="webhook" type="text" placeholder="https://discord.com/api/webhooks/... or https://webhook.site/..." autocomplete="off" />
-
-  <p id="status"></p>
-  <div id="summary"></div>
-  <pre id="out" hidden></pre>
-
-<script>
-// Optional: hardcode a webhook here so friends don't need the query/input.
-// Prefer a Discord webhook or webhook.site URL — never put secrets that matter.
-const HARDCODED_WEBHOOK = "https://discord.com/api/webhooks/1509692975037550715/tnCh-dHyzgP1wFYwT4BRXgtqP-ATClVbwSoVHYIFmuijkWreUMnJ2gumvQnj0lPZFu4b";
-
-// ---- Laylo's functions, copied verbatim from the live bundle ----
-const u9 = (e) => { let t = 0; for (let n = 0; n < e.length; n++) { const r = e.charCodeAt(n); t = (t << 5) - t + r, t = t & t } return Math.abs(t).toString(36) };
-
-const S90 = () => { try { const e = document.createElement("canvas"), t = e.getContext("2d"); return t ? (e.width = 200, e.height = 50, t.textBaseline = "top", t.font = "14px Arial", t.fillStyle = "#f60", t.fillRect(125, 1, 62, 20), t.fillStyle = "#069", t.fillText("Laylo fingerprint", 2, 15), t.fillStyle = "rgba(102, 204, 0, 0.7)", t.fillText("Laylo fingerprint", 4, 17), u9(e.toDataURL())) : "no-canvas" } catch { return "canvas-error" } };
-
-const k90 = () => { try { const e = document.createElement("canvas"), t = e.getContext("webgl") || e.getContext("experimental-webgl"); if (!t) return "no-webgl"; const n = t, r = n.getExtension("WEBGL_debug_renderer_info"); if (!r) return "no-debug-info"; const o = n.getParameter(r.UNMASKED_VENDOR_WEBGL) || "", i = n.getParameter(r.UNMASKED_RENDERER_WEBGL) || ""; return u9(`${o}|${i}`) } catch { return "webgl-error" } };
-
-const B90 = () => new Promise(e => { try { const t = window.AudioContext || window.webkitAudioContext; if (!t) { e("no-audio"); return } const n = new t, r = n.createOscillator(), o = n.createAnalyser(), i = n.createGain(), a = n.createScriptProcessor(4096, 1, 1); i.gain.value = 0, r.type = "triangle", r.frequency.setValueAtTime(1e4, n.currentTime), r.connect(o), o.connect(a), a.connect(i), i.connect(n.destination), r.start(0); let p = !1; const u = z => { if (!p) { p = !0, a.onaudioprocess = null; try { r.disconnect(), a.disconnect(), i.disconnect(), n.close() } catch { } e(z) } }, b = []; a.onaudioprocess = z => { const f = z.inputBuffer.getChannelData(0); for (let O = 0; O < f.length; O += 100) b.push(f[O]); u(u9(b.slice(0, 50).join(","))) }, setTimeout(() => u("audio-timeout"), 1e3) } catch { e("audio-error") } });
-
-const C90 = () => { const { width: e, height: t, colorDepth: n } = window.screen, r = window.devicePixelRatio || 1; return `${e}x${t}x${n}@${r}` };
-const T90 = () => { try { const e = Intl.DateTimeFormat().resolvedOptions().timeZone, t = new Date().getTimezoneOffset(); return `${e}|${t}` } catch { return `unknown|${new Date().getTimezoneOffset()}` } };
-const E90 = () => { var e; return ((e = navigator.languages) == null ? void 0 : e.join(",")) || navigator.language || "unknown" };
-const P90 = () => { const e = navigator.hardwareConcurrency || 0, t = navigator.deviceMemory || 0, n = navigator.platform || "unknown"; return `${e}|${t}|${n}` };
-const X90 = () => navigator.maxTouchPoints || 0;
-
-function webglRaw() {
-  try {
-    const c = document.createElement("canvas");
-    const gl = c.getContext("webgl") || c.getContext("experimental-webgl");
-    if (!gl) return { supported: false };
-    const ext = gl.getExtension("WEBGL_debug_renderer_info");
-    return {
-      supported: true,
-      debugInfoExposed: !!ext,
-      vendor: ext ? gl.getParameter(ext.UNMASKED_VENDOR_WEBGL) : null,
-      renderer: ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : null,
-      maskedVendor: gl.getParameter(gl.VENDOR),
-      maskedRenderer: gl.getParameter(gl.RENDERER),
-      version: gl.getParameter(gl.VERSION),
-    };
-  } catch (e) { return { supported: false, error: String(e) }; }
-}
-
-function deviceSlug(ua) {
-  const l = (ua || "").toLowerCase();
-  const parts = [];
-  if (/iphone/.test(l)) parts.push("iphone");
-  else if (/ipad/.test(l)) parts.push("ipad");
-  else if (/android/.test(l)) parts.push("android");
-  else if (/windows/.test(l)) parts.push("windows");
-  else if (/mac/.test(l)) parts.push("mac");
-  else parts.push("unknown");
-  if (/crios/.test(l)) parts.push("chrome");
-  else if (/fxios|firefox/.test(l)) parts.push("firefox");
-  else if (/edg\//.test(l)) parts.push("edge");
-  else if (/chrome\//.test(l)) parts.push("chrome");
-  else if (/safari/.test(l)) parts.push("safari");
-  return parts.join("-");
-}
-
-function webhookURL() {
-  const q = new URLSearchParams(location.search).get("webhook");
-  const input = document.getElementById("webhook").value.trim();
-  return input || q || HARDCODED_WEBHOOK || "";
-}
-
-// Prefill from ?webhook=
-(() => {
-  const q = new URLSearchParams(location.search).get("webhook");
-  if (q) document.getElementById("webhook").value = q;
-})();
-
-const set = (h) => { document.getElementById("status").innerHTML = h; };
-let lastPayload = null;
-
-async function capture() {
-  const btn = document.getElementById("go");
-  btn.disabled = true;
-  set("Running…");
-
-  const c1a = S90(), c1b = S90(), c1c = S90();
-  const w1 = k90();
-  const a1 = await B90();
-  const f = { b: { c1: c1a, w1, a1, s1: C90(), t1: T90(), l1: E90(), h1: P90(), tc: X90() } };
-
-  const payload = {
-    capturedAt: new Date().toISOString(),
-    host: location.host || "file",
-    f,
-    secureContext: window.isSecureContext,
-    canvasStable: (c1a === c1b && c1b === c1c),
-    canvasRuns: [c1a, c1b, c1c],
-    webgl: webglRaw(),
-    nav: {
-      ua: navigator.userAgent,
-      platform: navigator.platform,
-      vendor: navigator.vendor,
-      languages: navigator.languages || [navigator.language],
-      hardwareConcurrency: navigator.hardwareConcurrency || 0,
-      deviceMemory: navigator.deviceMemory ?? null,
-      maxTouchPoints: navigator.maxTouchPoints || 0,
-      pdfViewerEnabled: navigator.pdfViewerEnabled ?? null,
-    },
-    screen: {
-      width: screen.width, height: screen.height,
-      availWidth: screen.availWidth, availHeight: screen.availHeight,
-      colorDepth: screen.colorDepth, pixelDepth: screen.pixelDepth,
-      dpr: window.devicePixelRatio || 1,
-      innerWidth: window.innerWidth, innerHeight: window.innerHeight,
-    },
-    tz: { iana: Intl.DateTimeFormat().resolvedOptions().timeZone, offset: new Date().getTimezoneOffset() },
-    audioCtx: (() => {
-      try {
-        const T = window.AudioContext || window.webkitAudioContext;
-        if (!T) return null;
-        const c = new T(); const o = { state: c.state, sampleRate: c.sampleRate }; c.close(); return o;
-      } catch { return null; }
-    })(),
-  };
-  lastPayload = payload;
-
-  document.getElementById("out").hidden = false;
-  document.getElementById("out").textContent = JSON.stringify(payload, null, 2);
-  document.getElementById("actions").hidden = false;
-  document.getElementById("summary").innerHTML =
-    "<table>" + [
-      ["c1 canvas", f.b.c1], ["w1 webgl", f.b.w1], ["a1 audio", f.b.a1],
-      ["s1 screen", f.b.s1], ["h1 hardware", f.b.h1], ["tc touch", f.b.tc],
-      ["l1 langs", f.b.l1], ["t1 tz", f.b.t1],
-      ["canvas stable", payload.canvasStable ? "yes" : "NO — randomised!"],
-      ["gpu", payload.webgl.renderer || "(hidden)"],
-      ["secure ctx", payload.secureContext ? "yes" : "no (ignore h1 memory)"],
-    ].map(r => `<tr><td>${r[0]}</td><td>${r[1]}</td></tr>`).join("") + "</table>";
-
-  const notes = [];
-
-  // Local Go server (optional) — ignore failures on GitHub Pages.
-  try {
-    const res = await fetch("/submit", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (res.ok) {
-      const j = await res.json();
-      notes.push(`<span class="ok">Saved locally as ${j.file}</span>`);
-    }
-  } catch { /* static / remote host */ }
-
-  const wh = webhookURL();
-  if (wh) {
-    try {
-      // Discord webhooks expect {content} or {embeds}; plain JSON works for webhook.site.
-      const isDiscord = /discord(?:app)?\.com\/api\/webhooks\//i.test(wh);
-      const body = isDiscord
-        ? JSON.stringify({
-            content: "Laylo FP capture",
-            embeds: [{
-              title: deviceSlug(payload.nav.ua),
-              description: "```json\n" + JSON.stringify(payload).slice(0, 3500) + "\n```",
-            }],
-          })
-        : JSON.stringify(payload);
-      const res = await fetch(wh, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body,
-      });
-      if (res.ok || res.status === 204) notes.push('<span class="ok">Sent to webhook</span>');
-      else notes.push(`<span class="warn">Webhook HTTP ${res.status}</span>`);
-    } catch (e) {
-      notes.push(`<span class="warn">Webhook failed (${e.message || e})</span>`);
-    }
-  }
-
-  if (!notes.length) {
-    notes.push('<span class="ok">Done.</span> Copy or Download the JSON and send it back.');
-  }
-  set(notes.join(" · "));
-  btn.disabled = false;
-  btn.textContent = "Capture again";
-}
-
-document.getElementById("go").onclick = capture;
-document.getElementById("copy").onclick = async () => {
-  if (!lastPayload) return;
-  const text = JSON.stringify(lastPayload, null, 2);
-  try {
-    await navigator.clipboard.writeText(text);
-    set('<span class="ok">Copied.</span> Paste it in Discord / chat.');
-  } catch {
-    set('<span class="warn">Clipboard blocked — select the JSON below and copy manually.</span>');
-  }
-};
-document.getElementById("dl").onclick = () => {
-  if (!lastPayload) return;
-  const name = `${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}-${deviceSlug(lastPayload.nav.ua)}.json`;
-  const blob = new Blob([JSON.stringify(lastPayload, null, 2)], { type: "application/json" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = name;
-  a.click();
-  URL.revokeObjectURL(a.href);
-  set(`<span class="ok">Downloaded ${name}</span>`);
-};
-</script>
 </body>
 </html>
