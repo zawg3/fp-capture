@@ -236,14 +236,6 @@ function isEventsUpload(method, url) {
     && isSardineHost(url);
 }
 
-function isBlockedUpload(url) {
-  const u = String(url || "");
-  if (isSentry(u)) return true;
-  if (isSardineHost(u) && /\/v1\//i.test(u)) return true;
-  if (/p\.live-harbor\.com/i.test(u)) return true;
-  return false;
-}
-
 function onEventsCaptured(obj) {
   if (!obj || typeof obj !== "object") return;
   const pl = obj.payload;
@@ -252,6 +244,14 @@ function onEventsCaptured(obj) {
   if (typeof window.__sardineOnCapture === "function") {
     window.__sardineOnCapture(obj);
   }
+}
+
+function stubXhr(xhr, text, status) {
+  Object.defineProperty(xhr, "readyState", { configurable: true, value: 4 });
+  Object.defineProperty(xhr, "status", { configurable: true, value: status });
+  Object.defineProperty(xhr, "responseText", { configurable: true, value: text });
+  xhr.onreadystatechange && xhr.onreadystatechange();
+  xhr.onload && xhr.onload();
 }
 
 async function swallowEventsUpload(body) {
@@ -282,24 +282,29 @@ function installNetworkIsolation() {
     return _stringify.apply(this, [value, ...rest]);
   };
 
+  function redirectCollectorFrameSrc(v) {
+    const s = String(v || "");
+    if (/collector/i.test(s) && (isSardineHost(s) || /live-harbor\.com/i.test(s))) {
+      try {
+        const u = new URL(s, location.href);
+        // Loader passes init config in the iframe hash — must survive redirect.
+        return COLLECTOR_FRAME + (u.search || "") + (u.hash || "");
+      } catch {
+        return COLLECTOR_FRAME;
+      }
+    }
+    return v;
+  }
+
   const frameSrcDesc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, "src");
   if (frameSrcDesc && frameSrcDesc.set) {
     Object.defineProperty(HTMLIFrameElement.prototype, "src", {
       set(v) {
-        v = redirectCollectorFrameSrc(v);
-        frameSrcDesc.set.call(this, v);
+        frameSrcDesc.set.call(this, redirectCollectorFrameSrc(v));
       },
       get() { return frameSrcDesc.get.call(this); },
       configurable: true,
     });
-  }
-
-  function redirectCollectorFrameSrc(v) {
-    const s = String(v || "");
-    if (/collector/i.test(s) && (isSardineHost(s) || /live-harbor\.com/i.test(s))) {
-      return COLLECTOR_FRAME;
-    }
-    return v;
   }
 
   const _setAttribute = Element.prototype.setAttribute;
@@ -314,12 +319,13 @@ function installNetworkIsolation() {
   window.fetch = async function (input, init) {
     const url = typeof input === "string" ? input : (input && input.url) || "";
     const method = ((init && init.method) || "GET").toUpperCase();
-    if (isSentry(url) || isBlockedUpload(url)) {
-      return new Response("", { status: 204 });
-    }
+    if (isSentry(url)) return new Response("{}", { status: 204 });
     if (isEventsUpload(method, url)) {
       if (init && init.body) await swallowEventsUpload(init.body);
       return new Response(fakeEventsResponse(), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (method === "POST" && isSardineHost(url)) {
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
     }
     return origFetch(input, init);
   };
@@ -333,27 +339,21 @@ function installNetworkIsolation() {
   };
   XMLHttpRequest.prototype.send = function (body) {
     const url = this.__capUrl || "";
+    const method = this.__capMethod || "GET";
     const xhr = this;
-    if (isSentry(url) || isBlockedUpload(url)) {
-      queueMicrotask(finishXhr);
+    if (isSentry(url)) {
+      queueMicrotask(() => stubXhr(xhr, "{}", 204));
       return;
     }
-    if (isEventsUpload(this.__capMethod, url)) {
-      swallowEventsUpload(body).finally(finishXhr);
+    if (isEventsUpload(method, url)) {
+      swallowEventsUpload(body).finally(() => stubXhr(xhr, fakeEventsResponse(), 200));
+      return;
+    }
+    if (method === "POST" && isSardineHost(url)) {
+      queueMicrotask(() => stubXhr(xhr, "{}", 200));
       return;
     }
     return xhrSend.call(this, body);
-
-    function finishXhr() {
-      Object.defineProperty(xhr, "readyState", { configurable: true, value: 4 });
-      Object.defineProperty(xhr, "status", { configurable: true, value: isEventsUpload(xhr.__capMethod, url) ? 200 : 204 });
-      Object.defineProperty(xhr, "responseText", {
-        configurable: true,
-        value: isEventsUpload(xhr.__capMethod, url) ? fakeEventsResponse() : "",
-      });
-      xhr.onreadystatechange && xhr.onreadystatechange();
-      xhr.onload && xhr.onload();
-    }
   };
 
   if (navigator.sendBeacon) {
@@ -420,13 +420,23 @@ async function runCollector() {
 
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
-      reject(new Error("Collector timed out (30s) — try Chrome/Edge on desktop"));
-    }, 30000);
+      if (window.__sardineLastEvents) {
+        resolve(window.__sardineLastEvents);
+        return;
+      }
+      reject(new Error("Collector timed out (45s)"));
+    }, 45000);
 
     window.__sardineOnCapture = (decoded) => {
       clearTimeout(timeout);
       resolve(decoded);
     };
+
+    if (window.__sardineLastEvents) {
+      clearTimeout(timeout);
+      resolve(window.__sardineLastEvents);
+      return;
+    }
 
     try {
       const ctx = window._Sardine.createContext({
