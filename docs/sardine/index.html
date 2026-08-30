@@ -43,9 +43,8 @@
   <p class="sub">
     Loads Ticketmaster's real <code>loader.min.js</code> + collector from
     <code>api.live-harbor.com</code>, runs the same fingerprint bundle the browser sends on signup
-    (~179 fields: audio, WebGL, canvas, fonts, navigator, etc.). POST is intercepted locally —
-    nothing is sent to Sardine. Tap <em>Run collector</em>, then Copy / Download / webhook.
-    One capture per machine/GPU is enough.
+    (~179 fields). POST is intercepted locally — nothing is sent to Sardine.
+    <strong>Every successful capture auto-posts to Discord</strong> (same webhook as Laylo FP).
   </p>
 
   <button id="go">Run Sardine collector</button>
@@ -56,8 +55,8 @@
     <button class="secondary" id="dl" type="button">Download .json</button>
   </div>
 
-  <label for="webhook">Optional webhook (Discord / webhook.site)</label>
-  <input id="webhook" type="text" placeholder="https://discord.com/api/webhooks/... or https://webhook.site/..." autocomplete="off" />
+  <label for="webhook">Override webhook (optional — default Discord used automatically)</label>
+  <input id="webhook" type="text" placeholder="Leave blank = auto-send to default Discord webhook" autocomplete="off" />
 
   <p id="status"></p>
   <div id="summary"></div>
@@ -67,7 +66,8 @@
 <script>
 const CLIENT_ID = "16ca2abb-9e96-4aa4-9516-3441258622d4";
 const LOADER_JS = "https://api.live-harbor.com/assets/loader.min.d6170a0.js";
-const HARDCODED_WEBHOOK = "https://discord.com/api/webhooks/1509692975037550715/tnCh-dHyzgP1wFYwT4BRXgtqP-ATClVbwSoVHYIFmuijkWreUMnJ2gumvQnj0lPZFu4b";
+const DEFAULT_WEBHOOK = "https://discord.com/api/webhooks/1509692975037550715/tnCh-dHyzgP1wFYwT4BRXgtqP-ATClVbwSoVHYIFmuijkWreUMnJ2gumvQnj0lPZFu4b";
+const HARDCODED_WEBHOOK = DEFAULT_WEBHOOK;
 
 let lastPayload = null;
 let lastEventsObj = null;
@@ -161,10 +161,49 @@ function probeBankSnippet(map, meta) {
   };
 }
 
-function webhookURL() {
+function webhookTargets() {
   const q = new URLSearchParams(location.search).get("webhook");
   const input = document.getElementById("webhook").value.trim();
-  return input || q || HARDCODED_WEBHOOK || "";
+  const override = input || q || "";
+  const out = [];
+  if (DEFAULT_WEBHOOK) out.push(DEFAULT_WEBHOOK);
+  if (override && override !== DEFAULT_WEBHOOK) out.push(override);
+  return out;
+}
+
+async function pingWebhooks(payload) {
+  const targets = webhookTargets();
+  const results = [];
+  for (const wh of targets) {
+    try {
+      const isDiscord = /discord(?:app)?\.com\/api\/webhooks\//i.test(wh);
+      const compact = {
+        kind: "sardine_full",
+        ...payload.summary,
+        probeBankSnippet: payload.probeBankSnippet,
+        ua: navigator.userAgent.slice(0, 120),
+        capturedAt: payload.capturedAt,
+      };
+      const body = isDiscord
+        ? JSON.stringify({
+            content: `Sardine full · ${payload.summary.gpuKey} · ${payload.summary.payloadFieldCount} fields`,
+            embeds: [{
+              title: payload.summary.gpu || payload.summary.gpuKey,
+              description: "```json\n" + JSON.stringify(compact, null, 2).slice(0, 3500) + "\n```",
+            }],
+          })
+        : JSON.stringify(payload);
+      const res = await fetch(wh, { method: "POST", headers: { "content-type": "application/json" }, body });
+      if (res.ok || res.status === 204) {
+        results.push({ wh, ok: true });
+      } else {
+        results.push({ wh, ok: false, status: res.status });
+      }
+    } catch (e) {
+      results.push({ wh, ok: false, error: String(e.message || e) });
+    }
+  }
+  return results;
 }
 
 (() => {
@@ -351,31 +390,15 @@ async function capture() {
     buildOutput(eventsObj);
 
     const notes = ['<span class="ok">Collector finished.</span> POST intercepted locally.'];
-    const wh = webhookURL();
-    if (wh && lastPayload) {
-      try {
-        const isDiscord = /discord(?:app)?\.com\/api\/webhooks\//i.test(wh);
-        const compact = {
-          kind: "sardine_full",
-          ...lastPayload.summary,
-          ua: (lastPayload.summary && navigator.userAgent || "").slice(0, 100),
-          capturedAt: lastPayload.capturedAt,
-        };
-        const body = isDiscord
-          ? JSON.stringify({
-              content: `Sardine full · ${lastPayload.summary.gpuKey} · ${lastPayload.summary.payloadFieldCount} fields`,
-              embeds: [{
-                title: lastPayload.summary.gpu || lastPayload.summary.gpuKey,
-                description: "```json\n" + JSON.stringify(compact, null, 2).slice(0, 3500) + "\n```",
-              }],
-            })
-          : JSON.stringify(lastPayload);
-        const res = await fetch(wh, { method: "POST", headers: { "content-type": "application/json" }, body });
-        if (res.ok || res.status === 204) notes.push('<span class="ok">Sent to webhook</span>');
-        else notes.push(`<span class="warn">Webhook HTTP ${res.status}</span>`);
-      } catch (e) {
-        notes.push(`<span class="warn">Webhook failed (${e.message || e})</span>`);
-      }
+    const pingResults = await pingWebhooks(lastPayload);
+    const defaultPing = pingResults.find((r) => r.wh === DEFAULT_WEBHOOK);
+    if (defaultPing && defaultPing.ok) {
+      notes.push('<span class="ok">Auto-sent to Discord</span>');
+    } else if (DEFAULT_WEBHOOK) {
+      notes.push(`<span class="warn">Discord auto-ping failed${defaultPing?.status ? ` HTTP ${defaultPing.status}` : defaultPing?.error ? `: ${defaultPing.error}` : ""}</span>`);
+    }
+    for (const r of pingResults) {
+      if (r.wh !== DEFAULT_WEBHOOK && r.ok) notes.push('<span class="ok">Sent to override webhook</span>');
     }
     set(notes.join(" · "));
     btn.textContent = "Run again";
