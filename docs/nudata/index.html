@@ -41,10 +41,10 @@
     Loads Ticketmaster's real NuData <code>sync/js</code> for widget <code>w-481390</code> — same
     script the auth page uses. The widget's own JS collects <code>widgetData</code> (move mouse /
     tap anywhere on the page first if you want <code>ipr</code> samples). <strong>Capture only</strong>
-    — nothing POSTed to NuData; Discord webhook is the only outbound send.
+    — nothing POSTed to NuData. Full JSON auto-sends to Discord (~2.5s after widget updates).
   </p>
 
-  <button id="go" disabled>Capture NuData payload</button>
+  <button id="go" disabled>Capture &amp; send again</button>
   <div class="row" id="actions" hidden>
     <button class="secondary" id="copy" type="button">Copy full JSON</button>
     <button class="secondary" id="copyWd" type="button">Copy widgetData</button>
@@ -65,6 +65,8 @@ const DEFAULT_WEBHOOK = "https://discord.com/api/webhooks/1509692975037550715/tn
 
 let lastPayload = null;
 let networkIsolationInstalled = false;
+let autoPingTimer = null;
+let discordSentFor = "";
 
 (() => {
   const q = new URLSearchParams(location.search).get("webhook");
@@ -142,9 +144,22 @@ function getPmdInput() {
     || document.querySelector('[name="nds-pmd"]');
 }
 
+function widgetFingerprint(wd) {
+  if (!wd) return "";
+  return [wd.wg, wd.fm, wd.hf, (wd.ipr || "").length].join("|");
+}
+
 function onPlainCapture(obj) {
   if (!obj || !obj.widgetData) return;
   window.__nudataLastPlain = obj;
+  scheduleAutoDiscord();
+}
+
+function scheduleAutoDiscord() {
+  clearTimeout(autoPingTimer);
+  autoPingTimer = setTimeout(() => {
+    finalizeCapture({ auto: true }).catch(() => {});
+  }, 2500);
 }
 
 function buildOutput(plainObj, rawWire) {
@@ -291,33 +306,50 @@ function webhookTargets() {
   return out;
 }
 
+function chunkText(text, max) {
+  const out = [];
+  for (let i = 0; i < text.length; i += max) out.push(text.slice(i, i + max));
+  return out;
+}
+
 async function pingWebhooks(payload) {
   const wd = payload.widgetData || {};
-  const compact = {
-    kind: "nudata_base",
-    platform: payload.platform,
-    pl: wd.pl,
-    sr: wd.sr,
-    wg: wd.wg,
-    fm: wd.fm,
-    hf: wd.hf,
-    bp: wd.bp,
-    ft: wd.ft,
-    iprLen: (wd.ipr || "").length,
-    ua: navigator.userAgent.slice(0, 100),
-  };
+  const full = JSON.stringify(payload, null, 2);
   const results = [];
   for (const wh of webhookTargets()) {
     try {
       const isDiscord = /discord(?:app)?\.com\/api\/webhooks\//i.test(wh);
-      const body = isDiscord
-        ? JSON.stringify({
-            content: `NuData base · ${compact.platform} · ${compact.pl} · wg ${compact.wg}`,
-            embeds: [{ title: "widgetData", description: "```json\n" + JSON.stringify(compact, null, 2).slice(0, 3500) + "\n```" }],
-          })
-        : JSON.stringify(payload);
-      const res = await fetch(wh, { method: "POST", headers: { "content-type": "application/json" }, body });
-      results.push({ wh, ok: res.ok || res.status === 204 });
+      if (!isDiscord) {
+        const res = await fetch(wh, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        results.push({ wh, ok: res.ok || res.status === 204, status: res.status, parts: 1 });
+        continue;
+      }
+      const chunks = chunkText(full, 5400);
+      let allOk = true;
+      let lastStatus = 0;
+      for (let i = 0; i < chunks.length; i++) {
+        const part = i + 1;
+        const body = JSON.stringify({
+          content: part === 1
+            ? `NuData capture · ${payload.platform} · ${wd.pl} · ipr ${(wd.ipr || "").length} chars · ${chunks.length} part(s)`
+            : `NuData capture · part ${part}/${chunks.length}`,
+          embeds: [{
+            title: part === 1
+              ? `NuData full · ${payload.platform} · wg ${wd.wg || "?"}`
+              : `NuData full · part ${part}/${chunks.length}`,
+            description: "```json\n" + chunks[i] + "\n```",
+          }],
+        });
+        const res = await fetch(wh, { method: "POST", headers: { "content-type": "application/json" }, body });
+        lastStatus = res.status;
+        if (!res.ok && res.status !== 204) allOk = false;
+        if (i < chunks.length - 1) await new Promise((r) => setTimeout(r, 400));
+      }
+      results.push({ wh, ok: allOk, status: lastStatus, parts: chunks.length });
     } catch (e) {
       results.push({ wh, ok: false, error: String(e.message || e) });
     }
@@ -374,25 +406,43 @@ function buildSummary(payload) {
   document.getElementById("actions").hidden = false;
 }
 
+async function finalizeCapture({ auto = false, forceDiscord = false } = {}) {
+  await new Promise((r) => setTimeout(r, auto ? 0 : 300));
+  const payload = readCapture();
+  const fp = widgetFingerprint(payload.widgetData);
+  lastPayload = payload;
+  buildSummary(lastPayload);
+
+  const notes = ['<span class="ok">Captured locally.</span> Nothing sent to NuData.'];
+  const shouldPing = forceDiscord || !auto || fp !== discordSentFor;
+  if (shouldPing) {
+    const pings = await pingWebhooks(lastPayload);
+    const defaultPing = pings.find((p) => p.wh === DEFAULT_WEBHOOK);
+    if (defaultPing && defaultPing.ok) {
+      notes.push('<span class="ok">Full payload sent to Discord</span>');
+      discordSentFor = fp;
+    } else if (DEFAULT_WEBHOOK) {
+      notes.push(`<span class="warn">Discord failed${defaultPing?.status ? ` HTTP ${defaultPing.status}` : defaultPing?.error ? `: ${defaultPing.error}` : ""}</span>`);
+    }
+  } else if (auto) {
+    notes.push('<span class="warn">Same payload already sent — move mouse/tap, then Capture again</span>');
+  }
+  set(notes.join(" · "));
+  document.getElementById("go").disabled = false;
+  document.getElementById("go").textContent = "Capture & send again";
+  return payload;
+}
+
 async function capture() {
   const btn = document.getElementById("go");
   btn.disabled = true;
   set("Reading capture…");
   try {
-    await new Promise((r) => setTimeout(r, 300));
-    lastPayload = readCapture();
-    buildSummary(lastPayload);
-    const notes = ['<span class="ok">Captured locally.</span> Nothing sent to NuData.'];
-    const pings = await pingWebhooks(lastPayload);
-    if (pings.some((p) => p.ok && p.wh === DEFAULT_WEBHOOK)) {
-      notes.push('<span class="ok">Auto-sent to Discord</span>');
-    }
-    set(notes.join(" · "));
-    btn.textContent = "Capture again";
+    await finalizeCapture({ forceDiscord: true });
   } catch (e) {
     set(`<span class="err">${e.message || e}</span>`);
+    btn.disabled = false;
   }
-  btn.disabled = false;
 }
 
 installNetworkIsolation();
@@ -402,7 +452,8 @@ hookPmdInput();
 loadNuDataScript()
   .then(() => {
     document.getElementById("go").disabled = false;
-    set('<span class="ok">NuData loaded.</span> Move mouse / tap the page, then Capture.');
+    set('<span class="ok">NuData loaded.</span> Interact with the page — full payload auto-sends to Discord.');
+    scheduleAutoDiscord();
   })
   .catch((e) => set(`<span class="err">${e.message}</span>`));
 

@@ -20,10 +20,9 @@ async function main() {
   await page.waitForFunction(() => !document.getElementById("go")?.disabled, { timeout: 45000 });
   await page.mouse.move(200, 200);
   await page.mouse.click(200, 200);
-  await page.click("#go");
   await page.waitForFunction(
-    () => /Captured locally|err/i.test(document.getElementById("status")?.textContent || ""),
-    { timeout: 20000 },
+    () => /Full payload sent to Discord|Captured locally/i.test(document.getElementById("status")?.textContent || ""),
+    { timeout: 30000 },
   );
   const state = await page.evaluate(() => ({
     status: document.getElementById("status")?.textContent,
@@ -31,7 +30,7 @@ async function main() {
     pl: window.__nudataLastPlain?.widgetData?.pl,
   }));
   console.log(JSON.stringify({ state, nudataPosts }, null, 2));
-  const ok = nudataPosts.length === 0 && state.wg && /Captured locally/i.test(state.status || "");
+  const ok = nudataPosts.length === 0 && state.wg && /Full payload sent to Discord|Captured locally/i.test(state.status || "");
   console.log(ok ? "PASS" : "FAIL");
   await browser.close();
   process.exit(ok ? 0 : 1);
