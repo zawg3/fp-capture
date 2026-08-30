@@ -20,6 +20,7 @@ async function main() {
   await page.waitForFunction(() => !document.getElementById("go")?.disabled, { timeout: 45000 });
   await page.mouse.move(200, 200);
   await page.mouse.click(200, 200);
+  await page.click("#go");
   await page.waitForFunction(
     () => /Full payload sent to Discord|Captured locally/i.test(document.getElementById("status")?.textContent || ""),
     { timeout: 30000 },

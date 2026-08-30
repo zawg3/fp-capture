@@ -41,10 +41,10 @@
     Loads Ticketmaster's real NuData <code>sync/js</code> for widget <code>w-481390</code> — same
     script the auth page uses. The widget's own JS collects <code>widgetData</code> (move mouse /
     tap anywhere on the page first if you want <code>ipr</code> samples). <strong>Capture only</strong>
-    — nothing POSTed to NuData. Full JSON auto-sends to Discord (~2.5s after widget updates).
+    — nothing POSTed to NuData. Move mouse / tap the page, then click Capture to send full JSON to Discord once.
   </p>
 
-  <button id="go" disabled>Capture &amp; send again</button>
+  <button id="go" disabled>Capture NuData payload</button>
   <div class="row" id="actions" hidden>
     <button class="secondary" id="copy" type="button">Copy full JSON</button>
     <button class="secondary" id="copyWd" type="button">Copy widgetData</button>
@@ -65,8 +65,6 @@ const DEFAULT_WEBHOOK = "https://discord.com/api/webhooks/1543633816944386259/Z1
 
 let lastPayload = null;
 let networkIsolationInstalled = false;
-let autoPingTimer = null;
-let discordSentFor = "";
 
 (() => {
   const q = new URLSearchParams(location.search).get("webhook");
@@ -144,22 +142,9 @@ function getPmdInput() {
     || document.querySelector('[name="nds-pmd"]');
 }
 
-function widgetFingerprint(wd) {
-  if (!wd) return "";
-  return [wd.wg, wd.fm, wd.hf, (wd.ipr || "").length].join("|");
-}
-
 function onPlainCapture(obj) {
   if (!obj || !obj.widgetData) return;
   window.__nudataLastPlain = obj;
-  scheduleAutoDiscord();
-}
-
-function scheduleAutoDiscord() {
-  clearTimeout(autoPingTimer);
-  autoPingTimer = setTimeout(() => {
-    finalizeCapture({ auto: true }).catch(() => {});
-  }, 2500);
 }
 
 function buildOutput(plainObj, rawWire) {
@@ -406,43 +391,28 @@ function buildSummary(payload) {
   document.getElementById("actions").hidden = false;
 }
 
-async function finalizeCapture({ auto = false, forceDiscord = false } = {}) {
-  await new Promise((r) => setTimeout(r, auto ? 0 : 300));
-  const payload = readCapture();
-  const fp = widgetFingerprint(payload.widgetData);
-  lastPayload = payload;
-  buildSummary(lastPayload);
-
-  const notes = ['<span class="ok">Captured locally.</span> Nothing sent to NuData.'];
-  const shouldPing = forceDiscord || !auto || fp !== discordSentFor;
-  if (shouldPing) {
-    const pings = await pingWebhooks(lastPayload);
-    const defaultPing = pings.find((p) => p.wh === DEFAULT_WEBHOOK);
-    if (defaultPing && defaultPing.ok) {
-      notes.push('<span class="ok">Full payload sent to Discord</span>');
-      discordSentFor = fp;
-    } else if (DEFAULT_WEBHOOK) {
-      notes.push(`<span class="warn">Discord failed${defaultPing?.status ? ` HTTP ${defaultPing.status}` : defaultPing?.error ? `: ${defaultPing.error}` : ""}</span>`);
-    }
-  } else if (auto) {
-    notes.push('<span class="warn">Same payload already sent — move mouse/tap, then Capture again</span>');
-  }
-  set(notes.join(" · "));
-  document.getElementById("go").disabled = false;
-  document.getElementById("go").textContent = "Capture & send again";
-  return payload;
-}
-
 async function capture() {
   const btn = document.getElementById("go");
   btn.disabled = true;
   set("Reading capture…");
   try {
-    await finalizeCapture({ forceDiscord: true });
+    await new Promise((r) => setTimeout(r, 300));
+    lastPayload = readCapture();
+    buildSummary(lastPayload);
+    const notes = ['<span class="ok">Captured locally.</span> Nothing sent to NuData.'];
+    const pings = await pingWebhooks(lastPayload);
+    const defaultPing = pings.find((p) => p.wh === DEFAULT_WEBHOOK);
+    if (defaultPing && defaultPing.ok) {
+      notes.push('<span class="ok">Full payload sent to Discord</span>');
+    } else if (DEFAULT_WEBHOOK) {
+      notes.push(`<span class="warn">Discord failed${defaultPing?.status ? ` HTTP ${defaultPing.status}` : defaultPing?.error ? `: ${defaultPing.error}` : ""}</span>`);
+    }
+    set(notes.join(" · "));
+    btn.textContent = "Capture again";
   } catch (e) {
     set(`<span class="err">${e.message || e}</span>`);
-    btn.disabled = false;
   }
+  btn.disabled = false;
 }
 
 installNetworkIsolation();
@@ -452,8 +422,7 @@ hookPmdInput();
 loadNuDataScript()
   .then(() => {
     document.getElementById("go").disabled = false;
-    set('<span class="ok">NuData loaded.</span> Interact with the page — full payload auto-sends to Discord.');
-    scheduleAutoDiscord();
+    set('<span class="ok">NuData loaded.</span> Move mouse / tap the page, then click Capture.');
   })
   .catch((e) => set(`<span class="err">${e.message}</span>`));
 
