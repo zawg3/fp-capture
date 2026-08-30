@@ -43,8 +43,8 @@
   <p class="sub">
     Loads Ticketmaster's real <code>loader.min.js</code> + collector from
     <code>api.live-harbor.com</code>, runs the same fingerprint bundle the browser sends on signup
-    (~179 fields). POST is intercepted locally — nothing is sent to Sardine.
-    <strong>Every successful capture auto-posts to Discord</strong> (same webhook as Laylo FP).
+    (~179 fields). <strong>Capture only</strong> — probes run locally; nothing is POSTed to
+    Sardine (including Sentry error reports). Discord webhook is the only outbound send.
   </p>
 
   <button id="go">Run Sardine collector</button>
@@ -72,7 +72,9 @@ const HARDCODED_WEBHOOK = DEFAULT_WEBHOOK;
 let lastPayload = null;
 let lastEventsObj = null;
 let lastProbeSnippet = null;
-let fetchHookInstalled = false;
+let networkIsolationInstalled = false;
+
+const COLLECTOR_FRAME = new URL("frame.html", location.href).href;
 
 function randomHex(n) {
   const a = new Uint8Array(n / 2);
@@ -86,19 +88,6 @@ async function computeSessionKey(epsSid, unixSeconds) {
   let bin = "";
   for (const b of new Uint8Array(buf)) bin += String.fromCharCode(b);
   return btoa(bin);
-}
-
-async function decodeSardineWire(arrayBuffer) {
-  const u8 = new Uint8Array(arrayBuffer);
-  const gz = new Uint8Array(u8.length);
-  for (let i = 0; i < u8.length; i++) gz[i] = (u8[i] ^ i) & 0xff;
-  if (typeof DecompressionStream === "undefined") {
-    throw new Error("DecompressionStream not supported — use Chrome/Edge");
-  }
-  const ds = new DecompressionStream("gzip");
-  const out = await new Response(new Blob([gz]).stream().pipeThrough(ds)).arrayBuffer();
-  const text = new TextDecoder().decode(out);
-  return JSON.parse(text);
 }
 
 function payloadToMap(entries) {
@@ -213,37 +202,115 @@ async function pingWebhooks(payload) {
 
 const set = (h) => { document.getElementById("status").innerHTML = h; };
 
-function installFetchHook() {
-  if (fetchHookInstalled) return;
-  fetchHookInstalled = true;
-  const orig = window.fetch.bind(window);
+function isBlockedTelemetry(url) {
+  const u = String(url || "");
+  return /sentry\.io/i.test(u) || /ingest\.sentry/i.test(u);
+}
+
+function onEventsCaptured(obj) {
+  if (!obj || !Array.isArray(obj.payload) || obj.payload.length < 20) return;
+  window.__sardineLastEvents = obj;
+  if (typeof window.__sardineOnCapture === "function") {
+    window.__sardineOnCapture(obj);
+  }
+}
+
+function installNetworkIsolation() {
+  if (networkIsolationInstalled) return;
+  networkIsolationInstalled = true;
+
+  // Same-origin collector iframe (frame.html) → postMessage back here.
+  window.addEventListener("message", (e) => {
+    if (e.origin !== location.origin) return;
+    if (e.data && e.data.type === "sardine-capture" && e.data.data) {
+      onEventsCaptured(e.data.data);
+    }
+  });
+
+  // Redirect Sardine collector iframe to our hooked same-origin frame.
+  const frameSrcDesc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, "src");
+  if (frameSrcDesc && frameSrcDesc.set) {
+    Object.defineProperty(HTMLIFrameElement.prototype, "src", {
+      set(v) {
+        const s = String(v || "");
+        if (/live-harbor\.com/i.test(s) && /collector/i.test(s)) {
+          v = COLLECTOR_FRAME;
+        }
+        frameSrcDesc.set.call(this, v);
+      },
+      get() { return frameSrcDesc.get.call(this); },
+      configurable: true,
+    });
+  }
+
+  const _createElement = document.createElement.bind(document);
+  document.createElement = function (tag, opts) {
+    const el = _createElement(tag, opts);
+    if (String(tag).toLowerCase() === "iframe") {
+      el.addEventListener("load", () => {
+        const src = el.src || el.getAttribute("src") || "";
+        if (src.includes("frame.html") && el.contentWindow) {
+          try { el.contentWindow.focus(); } catch { /* ignore */ }
+        }
+      });
+    }
+    return el;
+  };
+
+  // Block loader Sentry noise (429s) and any stray harbor POST from parent context.
+  const origFetch = window.fetch.bind(window);
   window.fetch = async function (input, init) {
     const url = typeof input === "string" ? input : (input && input.url) || "";
-    const method = (init && init.method) || "GET";
-    if (url.includes("/v1/events") && method.toUpperCase() === "POST" && init && init.body) {
-      try {
-        let buf;
-        const body = init.body;
-        if (body instanceof ArrayBuffer) buf = body;
-        else if (body instanceof Uint8Array) buf = body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength);
-        else if (body instanceof Blob) buf = await body.arrayBuffer();
-        else if (typeof body === "string") buf = new TextEncoder().encode(body).buffer;
-        if (buf) {
-          const decoded = await decodeSardineWire(buf);
-          window.__sardineLastEvents = decoded;
-          if (typeof window.__sardineOnCapture === "function") {
-            window.__sardineOnCapture(decoded);
-          }
-        }
-      } catch (e) {
-        console.warn("[sardine-capture] decode failed", e);
-      }
-      return new Response(JSON.stringify({ deviceId: "fp-capture-local", deviceToken: "", captured: true }), {
+    if (isBlockedTelemetry(url)) {
+      return new Response("", { status: 204 });
+    }
+    if (((init && init.method) || "GET").toUpperCase() === "POST" && /live-harbor\.com\/v1\/events/i.test(url)) {
+      return new Response(JSON.stringify({ deviceId: "fp-capture-local", deviceToken: "" }), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
     }
-    return orig(input, init);
+    return origFetch(input, init);
+  };
+
+  const xhrOpen = XMLHttpRequest.prototype.open;
+  const xhrSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+    this.__capUrl = url;
+    this.__capMethod = (method || "GET").toUpperCase();
+    return xhrOpen.call(this, method, url, ...rest);
+  };
+  XMLHttpRequest.prototype.send = function (body) {
+    const url = this.__capUrl || "";
+    if (isBlockedTelemetry(url) || (this.__capMethod === "POST" && /live-harbor\.com\/v1\/events/i.test(url))) {
+      const xhr = this;
+      queueMicrotask(() => {
+        Object.defineProperty(xhr, "readyState", { configurable: true, value: 4 });
+        Object.defineProperty(xhr, "status", { configurable: true, value: this.__capMethod === "POST" ? 200 : 204 });
+        Object.defineProperty(xhr, "responseText", {
+          configurable: true,
+          value: this.__capMethod === "POST" ? JSON.stringify({ deviceId: "fp-capture-local", deviceToken: "" }) : "",
+        });
+        xhr.onreadystatechange && xhr.onreadystatechange();
+        xhr.onload && xhr.onload();
+      });
+      return;
+    }
+    return xhrSend.call(this, body);
+  };
+
+  const OrigWS = window.WebSocket;
+  window.WebSocket = function (url, protocols) {
+    if (/live-harbor\.com/i.test(String(url))) {
+      return {
+        readyState: 1,
+        send() {},
+        close() {},
+        addEventListener(ev, fn) { if (ev === "open") queueMicrotask(() => fn({ type: "open" })); },
+        removeEventListener() {},
+      };
+    }
+    return new OrigWS(url, protocols);
   };
 }
 
@@ -276,7 +343,7 @@ function loadLoader() {
 }
 
 async function runCollector() {
-  installFetchHook();
+  installNetworkIsolation();
   await loadLoader();
 
   const epsSid = randomHex(32);
@@ -286,8 +353,8 @@ async function runCollector() {
 
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
-      reject(new Error("Collector timed out (60s) — try Chrome/Edge on desktop"));
-    }, 60000);
+      reject(new Error("Collector timed out (30s) — try Chrome/Edge on desktop"));
+    }, 30000);
 
     window.__sardineOnCapture = (decoded) => {
       clearTimeout(timeout);
@@ -380,7 +447,7 @@ function buildOutput(eventsObj) {
 async function capture() {
   const btn = document.getElementById("go");
   btn.disabled = true;
-  set("Loading Sardine loader + running collector… (up to 60s)");
+  set("Loading collector (local capture only, no Sardine upload)…");
 
   try {
     if (!window.isSecureContext) {
@@ -389,7 +456,7 @@ async function capture() {
     const eventsObj = await runCollector();
     buildOutput(eventsObj);
 
-    const notes = ['<span class="ok">Collector finished.</span> POST intercepted locally.'];
+    const notes = ['<span class="ok">Captured locally.</span> Nothing sent to Sardine/Sentry.'];
     const pingResults = await pingWebhooks(lastPayload);
     const defaultPing = pingResults.find((r) => r.wh === DEFAULT_WEBHOOK);
     if (defaultPing && defaultPing.ok) {

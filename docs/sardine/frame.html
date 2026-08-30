@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <link rel="icon" href="data:;base64,iVBORw0KGgo=" />
+  <title>Sardine collector frame</title>
+  <script>
+(function () {
+  const PARENT = window.parent;
+  const ORIGIN = location.origin;
+
+  function emitCapture(obj) {
+    if (!obj || !Array.isArray(obj.payload) || obj.payload.length < 20) return;
+    if (window.__sardineCaptured) return;
+    window.__sardineCaptured = true;
+    try {
+      PARENT.postMessage({ type: "sardine-capture", data: obj }, ORIGIN);
+    } catch (e) {
+      console.warn("[sardine-frame] postMessage failed", e);
+    }
+  }
+
+  function isBlocked(url) {
+    const u = String(url || "");
+    return /sentry\.io/i.test(u) || /ingest\.sentry/i.test(u);
+  }
+
+  function isHarborTelemetry(url) {
+    const u = String(url || "");
+    if (isBlocked(u)) return true;
+    if (/live-harbor\.com/i.test(u) && /\/v1\/events/i.test(u) && !/\/v1\/events\/stream/i.test(u)) return true;
+    if (/p\.live-harbor\.com/i.test(u)) return true;
+    if (/live-harbor\.com.*\.png/i.test(u)) return true;
+    return false;
+  }
+
+  async function decodeSardineWire(buf) {
+    const u8 = buf instanceof ArrayBuffer ? new Uint8Array(buf) : new Uint8Array(buf.buffer || buf);
+    const gz = new Uint8Array(u8.length);
+    for (let i = 0; i < u8.length; i++) gz[i] = (u8[i] ^ i) & 0xff;
+    const ds = new DecompressionStream("gzip");
+    const out = await new Response(new Blob([gz]).stream().pipeThrough(ds)).arrayBuffer();
+    return JSON.parse(new TextDecoder().decode(out));
+  }
+
+  function fakeEventsResponse() {
+    return JSON.stringify({
+      deviceId: crypto.randomUUID ? crypto.randomUUID() : "fp-capture-local",
+      deviceToken: "capture-" + Math.random().toString(36).slice(2),
+    });
+  }
+
+  // Plaintext payload before gzip — most reliable capture path.
+  const _stringify = JSON.stringify;
+  JSON.stringify = function (value, ...rest) {
+    if (value && typeof value === "object" && Array.isArray(value.payload)) {
+      emitCapture(value);
+    }
+    return _stringify.apply(this, [value, ...rest]);
+  };
+
+  // Sardine POST uses XHR with octet-stream body.
+  const xhrOpen = XMLHttpRequest.prototype.open;
+  const xhrSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+    this.__capUrl = url;
+    this.__capMethod = (method || "GET").toUpperCase();
+    return xhrOpen.call(this, method, url, ...rest);
+  };
+  XMLHttpRequest.prototype.send = function (body) {
+    const url = this.__capUrl || "";
+    if (isBlocked(url)) {
+      queueMicrotask(() => {
+        Object.defineProperty(this, "readyState", { configurable: true, value: 4 });
+        Object.defineProperty(this, "status", { configurable: true, value: 204 });
+        Object.defineProperty(this, "responseText", { configurable: true, value: "" });
+        this.onreadystatechange && this.onreadystatechange();
+        this.onload && this.onload();
+      });
+      return;
+    }
+    if (this.__capMethod === "POST" && /\/v1\/events/i.test(url) && body) {
+      const xhr = this;
+      (async () => {
+        try {
+          let buf = body;
+          if (body instanceof Blob) buf = await body.arrayBuffer();
+          else if (body instanceof ArrayBuffer) buf = body;
+          else if (ArrayBuffer.isView(body)) buf = body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength);
+          emitCapture(await decodeSardineWire(buf));
+        } catch (e) {
+          console.warn("[sardine-frame] xhr decode failed", e);
+        }
+        Object.defineProperty(xhr, "readyState", { configurable: true, value: 4 });
+        Object.defineProperty(xhr, "status", { configurable: true, value: 200 });
+        Object.defineProperty(xhr, "responseText", { configurable: true, value: fakeEventsResponse() });
+        xhr.onreadystatechange && xhr.onreadystatechange();
+        xhr.onload && xhr.onload();
+      })();
+      return;
+    }
+    if (isHarborTelemetry(url)) {
+      queueMicrotask(() => {
+        Object.defineProperty(this, "readyState", { configurable: true, value: 4 });
+        Object.defineProperty(this, "status", { configurable: true, value: 204 });
+        Object.defineProperty(this, "responseText", { configurable: true, value: "" });
+        this.onreadystatechange && this.onreadystatechange();
+        this.onload && this.onload();
+      });
+      return;
+    }
+    return xhrSend.call(this, body);
+  };
+
+  const origFetch = window.fetch.bind(window);
+  window.fetch = async function (input, init) {
+    const url = typeof input === "string" ? input : (input && input.url) || "";
+    const method = ((init && init.method) || "GET").toUpperCase();
+    if (isBlocked(url) || (method === "POST" && /\/v1\/events/i.test(url))) {
+      if (method === "POST" && /\/v1\/events/i.test(url) && init && init.body) {
+        try {
+          let buf = init.body;
+          if (buf instanceof Blob) buf = await buf.arrayBuffer();
+          else if (typeof buf === "string") buf = new TextEncoder().encode(buf).buffer;
+          emitCapture(await decodeSardineWire(buf));
+        } catch (e) { /* stringify hook is primary */ }
+      }
+      return new Response(method === "POST" ? fakeEventsResponse() : "", {
+        status: method === "POST" ? 200 : 204,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (isHarborTelemetry(url)) {
+      return new Response("", { status: 204 });
+    }
+    return origFetch(input, init);
+  };
+
+  const OrigWS = window.WebSocket;
+  window.WebSocket = function (url, protocols) {
+    if (/live-harbor\.com/i.test(String(url))) {
+      const listeners = {};
+      const ws = {
+        readyState: 1,
+        CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3,
+        send() {},
+        close() { ws.readyState = 3; },
+        addEventListener(ev, fn) { (listeners[ev] = listeners[ev] || []).push(fn); if (ev === "open") queueMicrotask(() => fn({ type: "open" })); },
+        removeEventListener(ev, fn) {
+          if (!listeners[ev]) return;
+          listeners[ev] = listeners[ev].filter((f) => f !== fn);
+        },
+      };
+      return ws;
+    }
+    return new OrigWS(url, protocols);
+  };
+  window.WebSocket.prototype = OrigWS.prototype;
+
+  const imgSrc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "src");
+  if (imgSrc && imgSrc.set) {
+    Object.defineProperty(HTMLImageElement.prototype, "src", {
+      set(v) {
+        if (/live-harbor\.com/i.test(String(v)) || /p\.live-harbor\.com/i.test(String(v))) {
+          queueMicrotask(() => this.onload && this.onload());
+          return;
+        }
+        imgSrc.set.call(this, v);
+      },
+      get() { return imgSrc.get.call(this); },
+      configurable: true,
+    });
+  }
+})();
+  </script>
+  <script type="module" src="https://api.live-harbor.com/assets/collector.min.d6170a0.js"></script>
+</head>
+<body></body>
+</html>
