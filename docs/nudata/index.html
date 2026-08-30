@@ -52,16 +52,17 @@
   </div>
 
   <label for="webhook">Override webhook (optional — default Discord used automatically)</label>
-  <input id="webhook" type="text" placeholder="Leave blank = auto-send to default Discord webhook" autocomplete="off" />
+  <input id="webhook" type="text" placeholder="Leave blank = auto-send to default endpoint" autocomplete="off" />
 
   <p id="status">Loading NuData widget…</p>
   <div id="summary"></div>
   <pre id="out" hidden></pre>
 
+<script src="../_notify.js"></script>
 <script>
 const WIDGET_ID = "w-481390";
 const SYNC_JS = `https://nudata.ticketmaster.com/2.2/w/${WIDGET_ID}/sync/js/`;
-const DEFAULT_WEBHOOK = "https://discord.com/api/webhooks/1543633816944386259/Z15EMSCIaivO_2F6ptwMUSu_Qw1VWT7TeCs8LdHUpjOrgC9vsQGf-8uYJrQksPsDmMj_";
+const DEFAULT_WEBHOOK = typeof defaultNotifyEndpoint === "function" ? defaultNotifyEndpoint() : "";
 
 let lastPayload = null;
 let networkIsolationInstalled = false;
@@ -303,7 +304,9 @@ async function pingWebhooks(payload) {
   const results = [];
   for (const wh of webhookTargets()) {
     try {
-      const isDiscord = /discord(?:app)?\.com\/api\/webhooks\//i.test(wh);
+      const isDiscord = typeof isDiscordNotifyEndpoint === "function"
+        ? isDiscordNotifyEndpoint(wh)
+        : false;
       if (!isDiscord) {
         const res = await fetch(wh, {
           method: "POST",

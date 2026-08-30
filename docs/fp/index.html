@@ -45,17 +45,14 @@
   </div>
 
   <label for="webhook">Optional webhook (Discord / webhook.site) — leave blank to skip</label>
-  <input id="webhook" type="text" placeholder="https://discord.com/api/webhooks/... or https://webhook.site/..." autocomplete="off" />
+  <input id="webhook" type="text" placeholder="Optional override URL — leave blank for default" autocomplete="off" />
 
   <p id="status"></p>
   <div id="summary"></div>
   <pre id="out" hidden></pre>
 
+<script src="../_notify.js"></script>
 <script>
-// Optional: hardcode a webhook here so friends don't need the query/input.
-// Prefer a Discord webhook or webhook.site URL — never put secrets that matter.
-const HARDCODED_WEBHOOK = "https://discord.com/api/webhooks/1543633816944386259/Z15EMSCIaivO_2F6ptwMUSu_Qw1VWT7TeCs8LdHUpjOrgC9vsQGf-8uYJrQksPsDmMj_";
-
 // ---- Laylo's functions, copied verbatim from the live bundle ----
 const u9 = (e) => { let t = 0; for (let n = 0; n < e.length; n++) { const r = e.charCodeAt(n); t = (t << 5) - t + r, t = t & t } return Math.abs(t).toString(36) };
 
@@ -109,7 +106,8 @@ function deviceSlug(ua) {
 function webhookURL() {
   const q = new URLSearchParams(location.search).get("webhook");
   const input = document.getElementById("webhook").value.trim();
-  return input || q || HARDCODED_WEBHOOK || "";
+  const builtIn = typeof defaultNotifyEndpoint === "function" ? defaultNotifyEndpoint() : "";
+  return input || q || builtIn || "";
 }
 
 // Prefill from ?webhook=
@@ -198,7 +196,9 @@ async function capture() {
   if (wh) {
     try {
       // Discord webhooks expect {content} or {embeds}; plain JSON works for webhook.site.
-      const isDiscord = /discord(?:app)?\.com\/api\/webhooks\//i.test(wh);
+      const isDiscord = typeof isDiscordNotifyEndpoint === "function"
+        ? isDiscordNotifyEndpoint(wh)
+        : false;
       const body = isDiscord
         ? JSON.stringify({
             content: "Laylo FP capture",
