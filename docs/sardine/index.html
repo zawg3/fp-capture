@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>Sardine probe capture</title>
+  <title>Sardine full collector</title>
   <style>
     :root { color-scheme: dark; }
     body { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -13,8 +13,8 @@
     .nav { margin: 0 0 16px; font-size: 12px; }
     .nav a { color: #58a6ff; text-decoration: none; }
     .nav a:hover { text-decoration: underline; }
-    .row { display: flex; gap: 8px; margin-top: 10px; }
-    button { flex: 1; padding: 16px 12px; font-size: 15px; font-weight: 600;
+    .row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+    button { flex: 1; min-width: 120px; padding: 14px 10px; font-size: 14px; font-weight: 600;
              border: 0; border-radius: 10px; background: #238636; color: #fff;
              font-family: inherit; -webkit-appearance: none; }
     button.secondary { background: #21262d; color: #e6edf3; }
@@ -28,126 +28,103 @@
     td:first-child { color: #7d8590; width: 34%; }
     td:last-child { word-break: break-all; }
     pre { background: #161b22; padding: 12px; overflow: auto; border-radius: 8px;
-          font-size: 10px; white-space: pre-wrap; word-break: break-all; color: #8b949e; }
+          font-size: 10px; white-space: pre-wrap; word-break: break-all; color: #8b949e;
+          max-height: 420px; }
     label { display: block; font-size: 11px; color: #7d8590; margin: 12px 0 4px; }
     input[type=text] { width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 8px;
       border: 1px solid #30363d; background: #161b22; color: #e6edf3; font: inherit; font-size: 12px; }
     code { color: #79c0ff; }
+    #sardine-host { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
   </style>
 </head>
 <body>
   <p class="nav"><a href="../">← All collectors</a> · <a href="../fp/">Laylo FP</a></p>
-  <h1>Sardine probe capture</h1>
+  <h1>Sardine full collector</h1>
   <p class="sub">
-    Runs the same <strong>OfflineAudioContext</strong> + <strong>WebGL image hash</strong> probes
-    Sardine's collector uses (sha512 of the WebGL canvas PNG). Works on GitHub Pages — tap
-    <em>Capture</em>, then Copy / Download / webhook. One capture per machine/GPU is enough.
+    Loads Ticketmaster's real <code>loader.min.js</code> + collector from
+    <code>api.live-harbor.com</code>, runs the same fingerprint bundle the browser sends on signup
+    (~179 fields: audio, WebGL, canvas, fonts, navigator, etc.). POST is intercepted locally —
+    nothing is sent to Sardine. Tap <em>Run collector</em>, then Copy / Download / webhook.
+    One capture per machine/GPU is enough.
   </p>
 
-  <button id="go">Capture Sardine probes</button>
+  <button id="go">Run Sardine collector</button>
   <div class="row" id="actions" hidden>
-    <button class="secondary" id="copy" type="button">Copy JSON</button>
+    <button class="secondary" id="copy" type="button">Copy full JSON</button>
+    <button class="secondary" id="copyMap" type="button">Copy payload map</button>
     <button class="secondary" id="copyProbe" type="button">Copy probe_bank snippet</button>
     <button class="secondary" id="dl" type="button">Download .json</button>
   </div>
 
-  <label for="webhook">Optional webhook (Discord / webhook.site) — leave blank to skip</label>
+  <label for="webhook">Optional webhook (Discord / webhook.site)</label>
   <input id="webhook" type="text" placeholder="https://discord.com/api/webhooks/... or https://webhook.site/..." autocomplete="off" />
 
   <p id="status"></p>
   <div id="summary"></div>
   <pre id="out" hidden></pre>
+  <div id="sardine-host" aria-hidden="true"></div>
 
 <script>
-// Same webhook as Laylo page — override via ?webhook= or the input below.
+const CLIENT_ID = "16ca2abb-9e96-4aa4-9516-3441258622d4";
+const LOADER_JS = "https://api.live-harbor.com/assets/loader.min.d6170a0.js";
 const HARDCODED_WEBHOOK = "https://discord.com/api/webhooks/1509692975037550715/tnCh-dHyzgP1wFYwT4BRXgtqP-ATClVbwSoVHYIFmuijkWreUMnJ2gumvQnj0lPZFu4b";
 
-/** Sardine collector ax() — OfflineAudioContext sum (samples 4500–4999). */
-async function audioProbe() {
-  const context = new OfflineAudioContext(1, 5000, 44100);
-  const oscillator = context.createOscillator();
-  oscillator.type = "triangle";
-  oscillator.frequency.setValueAtTime(10000, context.currentTime);
-  const compressor = context.createDynamicsCompressor();
-  for (const [k, v] of [
-    ["threshold", -50], ["knee", 40], ["ratio", 12], ["attack", 0], ["release", 0.25],
-  ]) {
-    compressor[k].setValueAtTime(v, context.currentTime);
-  }
-  oscillator.connect(compressor);
-  compressor.connect(context.destination);
-  oscillator.start(0);
-  const buffer = await context.startRendering();
-  const data = buffer.getChannelData(0);
-  let sum = 0;
-  for (let i = 4500; i < 5000; i++) sum += Math.abs(data[i]);
-  return sum.toFixed(14);
+let lastPayload = null;
+let lastEventsObj = null;
+let lastProbeSnippet = null;
+let fetchHookInstalled = false;
+
+function randomHex(n) {
+  const a = new Uint8Array(n / 2);
+  crypto.getRandomValues(a);
+  return Array.from(a, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-/** Sardine collector WebGL shader + sha512(dataUrl) image hash. */
-function webglProbe() {
-  const width = 300, height = 150;
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const gl = canvas.getContext("webgl") || canvas.getContext("experimental-webgl");
-  if (!gl) return { error: "no webgl" };
-
-  const vsSrc =
-    "attribute vec2 attrVertex;varying vec2 varyinTexCoordinate;uniform vec2 uniformOffset;void main(){varyinTexCoordinate=attrVertex+uniformOffset;gl_Position=vec4(attrVertex,0,1);}";
-  const fsSrc =
-    "precision mediump float;varying vec2 varyinTexCoordinate;void main(){gl_FragColor=vec4(varyinTexCoordinate,0,1);}";
-
-  function compile(type, src) {
-    const sh = gl.createShader(type);
-    gl.shaderSource(sh, src);
-    gl.compileShader(sh);
-    return sh;
-  }
-
-  gl.clearColor(0, 0, 0, 1);
-  gl.enable(gl.DEPTH_TEST);
-  gl.depthFunc(gl.LEQUAL);
-  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-
-  const vs = compile(gl.VERTEX_SHADER, vsSrc);
-  const fs = compile(gl.FRAGMENT_SHADER, fsSrc);
-  const prog = gl.createProgram();
-  gl.attachShader(prog, vs);
-  gl.attachShader(prog, fs);
-  gl.linkProgram(prog);
-  gl.useProgram(prog);
-
-  const buf = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-  const verts = new Float32Array([
-    -0.2, -0.9, 0, 0.4, -0.26, 0, 0, 0.732134444, 0,
-  ]);
-  gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
-  const pos = gl.getAttribLocation(prog, "attrVertex");
-  gl.enableVertexAttribArray(pos);
-  gl.vertexAttribPointer(pos, 3, gl.FLOAT, false, 0, 0);
-  const off = gl.getUniformLocation(prog, "uniformOffset");
-  gl.uniform2f(off, 1, 1);
-  gl.drawArrays(gl.TRIANGLES, 0, 3);
-
-  const dataUrl = canvas.toDataURL("image/png");
-  const ext = gl.getExtension("WEBGL_debug_renderer_info");
-  return {
-    dataUrl,
-    dataUrlLen: dataUrl.length,
-    pngBytes: Math.floor((dataUrl.split(",")[1].length * 3) / 4),
-    vendor: ext ? gl.getParameter(ext.UNMASKED_VENDOR_WEBGL) : null,
-    renderer: ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : null,
-    maskedVendor: gl.getParameter(gl.VENDOR),
-    maskedRenderer: gl.getParameter(gl.RENDERER),
-    version: gl.getParameter(gl.VERSION),
-  };
+async function computeSessionKey(epsSid, unixSeconds) {
+  const msg = `${unixSeconds}:${epsSid}`;
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(msg));
+  let bin = "";
+  for (const b of new Uint8Array(buf)) bin += String.fromCharCode(b);
+  return btoa(bin);
 }
 
-async function sha512Hex(text) {
-  const buf = await crypto.subtle.digest("SHA-512", new TextEncoder().encode(text));
-  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+async function decodeSardineWire(arrayBuffer) {
+  const u8 = new Uint8Array(arrayBuffer);
+  const gz = new Uint8Array(u8.length);
+  for (let i = 0; i < u8.length; i++) gz[i] = (u8[i] ^ i) & 0xff;
+  if (typeof DecompressionStream === "undefined") {
+    throw new Error("DecompressionStream not supported — use Chrome/Edge");
+  }
+  const ds = new DecompressionStream("gzip");
+  const out = await new Response(new Blob([gz]).stream().pipeThrough(ds)).arrayBuffer();
+  const text = new TextDecoder().decode(out);
+  return JSON.parse(text);
+}
+
+function payloadToMap(entries) {
+  const m = {};
+  if (!Array.isArray(entries)) return m;
+  for (const pair of entries) {
+    if (Array.isArray(pair) && pair.length >= 2) m[pair[0]] = pair[1];
+  }
+  return m;
+}
+
+function parseP209(raw) {
+  if (!raw) return {};
+  try {
+    const o = typeof raw === "string" ? JSON.parse(raw) : raw;
+    const inner = o.o ? (typeof o.o === "string" ? JSON.parse(o.o) : o.o) : o;
+    return inner || {};
+  } catch { return {}; }
+}
+
+function gpuSlug(renderer) {
+  const r = (renderer || "unknown").toLowerCase();
+  const m = r.match(/geforce\s+rtx\s+(\d+)/i) || r.match(/radeon\s+rx\s+(\w+)/i)
+    || r.match(/intel\(r\)\s+(\w+)/i) || r.match(/apple\s+m(\d+)/i);
+  if (m) return m[0].replace(/\s+/g, "-").replace(/[()]/g, "");
+  return r.replace(/[^a-z0-9]+/g, "-").slice(0, 40).replace(/^-|-$/g, "") || "gpu";
 }
 
 function detectPlatform(ua) {
@@ -160,39 +137,16 @@ function detectPlatform(ua) {
   return "unknown";
 }
 
-function gpuSlug(renderer) {
-  const r = (renderer || "unknown").toLowerCase();
-  const m = r.match(/geforce\s+rtx\s+(\d+)/i) || r.match(/radeon\s+rx\s+(\w+)/i)
-    || r.match(/intel\(r\)\s+(\w+)/i) || r.match(/apple\s+m(\d+)/i);
-  if (m) return m[0].replace(/\s+/g, "-").replace(/[()]/g, "");
-  return r.replace(/[^a-z0-9]+/g, "-").slice(0, 40).replace(/^-|-$/g, "") || "gpu";
-}
-
-function deviceSlug(ua) {
-  const l = (ua || "").toLowerCase();
-  const parts = [];
-  if (/iphone/.test(l)) parts.push("iphone");
-  else if (/ipad/.test(l)) parts.push("ipad");
-  else if (/android/.test(l)) parts.push("android");
-  else if (/windows/.test(l)) parts.push("windows");
-  else if (/mac/.test(l)) parts.push("mac");
-  else parts.push("unknown");
-  if (/edg\//.test(l)) parts.push("edge");
-  else if (/chrome\//.test(l)) parts.push("chrome");
-  else if (/firefox\//.test(l)) parts.push("firefox");
-  else if (/safari/.test(l)) parts.push("safari");
-  return parts.join("-");
-}
-
-function probeBankSnippet(audio, webglImageHash, meta) {
+function probeBankSnippet(map, meta) {
   const platform = meta.platform || "win64";
   return {
     default_tls_client: "chrome_133_PSK",
     webgl_mode: "match_gpu",
     chrome_133_PSK: {
       [platform]: {
-        audio,
-        webglImageHash,
+        audio: map.audio,
+        webglImageHash: map.webglImageHash,
+        canvasHash: map.canvasHash,
         _captured_from: {
           userAgent: meta.userAgent,
           webglVendor: meta.webglVendor,
@@ -200,6 +154,7 @@ function probeBankSnippet(audio, webglImageHash, meta) {
           capturedAt: meta.capturedAt,
           host: meta.host,
           gpuKey: meta.gpuKey,
+          fieldCount: meta.fieldCount,
         },
       },
     },
@@ -218,167 +173,242 @@ function webhookURL() {
 })();
 
 const set = (h) => { document.getElementById("status").innerHTML = h; };
-let lastPayload = null;
-let lastProbeSnippet = null;
 
-async function capture() {
-  const btn = document.getElementById("go");
-  btn.disabled = true;
-  set("Running OfflineAudioContext + WebGL probes…");
+function installFetchHook() {
+  if (fetchHookInstalled) return;
+  fetchHookInstalled = true;
+  const orig = window.fetch.bind(window);
+  window.fetch = async function (input, init) {
+    const url = typeof input === "string" ? input : (input && input.url) || "";
+    const method = (init && init.method) || "GET";
+    if (url.includes("/v1/events") && method.toUpperCase() === "POST" && init && init.body) {
+      try {
+        let buf;
+        const body = init.body;
+        if (body instanceof ArrayBuffer) buf = body;
+        else if (body instanceof Uint8Array) buf = body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength);
+        else if (body instanceof Blob) buf = await body.arrayBuffer();
+        else if (typeof body === "string") buf = new TextEncoder().encode(body).buffer;
+        if (buf) {
+          const decoded = await decodeSardineWire(buf);
+          window.__sardineLastEvents = decoded;
+          if (typeof window.__sardineOnCapture === "function") {
+            window.__sardineOnCapture(decoded);
+          }
+        }
+      } catch (e) {
+        console.warn("[sardine-capture] decode failed", e);
+      }
+      return new Response(JSON.stringify({ deviceId: "fp-capture-local", deviceToken: "", captured: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return orig(input, init);
+  };
+}
 
-  let audio = null;
-  let wg = null;
-  let webglImageHash = null;
-  const errors = [];
+function loadLoader() {
+  return new Promise((resolve, reject) => {
+    if (window._Sardine && window._Sardine.createContext) {
+      resolve();
+      return;
+    }
+    window._sardine = window._sardine || [];
+    const s = document.createElement("script");
+    s.src = LOADER_JS;
+    s.async = true;
+    s.crossOrigin = "anonymous";
+    s.onload = () => {
+      let n = 0;
+      const t = setInterval(() => {
+        if (window._Sardine && window._Sardine.createContext) {
+          clearInterval(t);
+          resolve();
+        } else if (++n > 120) {
+          clearInterval(t);
+          reject(new Error("_Sardine.createContext not available after loader"));
+        }
+      }, 250);
+    };
+    s.onerror = () => reject(new Error("Failed to load Sardine loader"));
+    document.head.appendChild(s);
+  });
+}
 
-  try {
-    audio = await audioProbe();
-  } catch (e) {
-    errors.push("audio: " + (e.message || e));
-  }
+async function runCollector() {
+  installFetchHook();
+  await loadLoader();
 
-  try {
-    wg = webglProbe();
-    if (wg.error) errors.push("webgl: " + wg.error);
-    else if (wg.dataUrl) webglImageHash = await sha512Hex(wg.dataUrl);
-  } catch (e) {
-    errors.push("webgl: " + (e.message || e));
-  }
+  const epsSid = randomHex(32);
+  const unix = Math.floor(Date.now() / 1000);
+  const sessionKey = await computeSessionKey(epsSid, unix);
+  const loaderInitTime = Date.now();
 
-  const ua = navigator.userAgent;
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error("Collector timed out (60s) — try Chrome/Edge on desktop"));
+    }, 60000);
+
+    window.__sardineOnCapture = (decoded) => {
+      clearTimeout(timeout);
+      resolve(decoded);
+    };
+
+    try {
+      const ctx = window._Sardine.createContext({
+        clientId: CLIENT_ID,
+        sessionKey,
+        parentElement: document.getElementById("sardine-host"),
+        loaderInitTime,
+        location: location.href,
+        referrer: document.referrer || location.href,
+      });
+      if (!ctx) {
+        clearTimeout(timeout);
+        reject(new Error("createContext returned null — check console"));
+      }
+    } catch (e) {
+      clearTimeout(timeout);
+      reject(e);
+    }
+  });
+}
+
+function buildOutput(eventsObj) {
+  const payloadEntries = eventsObj.payload || [];
+  const map = payloadToMap(payloadEntries);
+  const p209 = parseP209(map.p209);
+  const ua = map.userAgent || navigator.userAgent;
+  const renderer = p209.rendererUnmasked || map.webglVendorAndRenderer || "";
+  const vendor = p209.vendorUnmasked || "";
+  const gpuKey = gpuSlug(renderer);
   const platform = detectPlatform(ua);
-  const gpuKey = gpuSlug(wg && wg.renderer);
   const capturedAt = new Date().toISOString();
 
   const meta = {
     userAgent: ua,
     platform,
-    webglVendor: wg && wg.vendor,
-    webglRenderer: wg && wg.renderer,
+    webglVendor: vendor,
+    webglRenderer: renderer,
     capturedAt,
-    host: location.host || "file",
+    host: location.host,
     gpuKey,
+    fieldCount: payloadEntries.length,
   };
 
-  lastProbeSnippet = probeBankSnippet(audio, webglImageHash, meta);
+  lastEventsObj = eventsObj;
+  lastProbeSnippet = probeBankSnippet(map, meta);
 
-  const payload = {
-    kind: "sardine_probe",
+  lastPayload = {
+    kind: "sardine_full_collector",
     capturedAt,
-    host: location.host || "file",
+    host: location.host,
     secureContext: window.isSecureContext,
-    audio,
-    webglImageHash,
-    webgl: wg ? {
-      vendor: wg.vendor,
-      renderer: wg.renderer,
-      maskedVendor: wg.maskedVendor,
-      maskedRenderer: wg.maskedRenderer,
-      version: wg.version,
-      dataUrlLen: wg.dataUrlLen,
-      pngBytes: wg.pngBytes,
-    } : null,
-    nav: {
-      ua,
-      platform: navigator.platform,
-      vendor: navigator.vendor,
-      languages: navigator.languages || [navigator.language],
-      hardwareConcurrency: navigator.hardwareConcurrency || 0,
-      deviceMemory: navigator.deviceMemory ?? null,
+    sdk: { loader: LOADER_JS, clientId: CLIENT_ID },
+    summary: {
+      audio: map.audio,
+      webglImageHash: map.webglImageHash,
+      canvasHash: map.canvasHash,
+      webglVendorAndRenderer: map.webglVendorAndRenderer,
+      gpu: renderer,
+      gpuKey,
+      platform,
+      payloadFieldCount: payloadEntries.length,
+      wireJsonBytes: JSON.stringify(eventsObj).length,
     },
-    screen: {
-      width: screen.width, height: screen.height,
-      colorDepth: screen.colorDepth,
-      dpr: window.devicePixelRatio || 1,
-    },
-    tz: {
-      iana: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      offset: new Date().getTimezoneOffset(),
-    },
+    payloadMap: map,
+    eventsObject: eventsObj,
     probeBankSnippet: lastProbeSnippet,
-    gpuKey,
-    platform,
-    errors: errors.length ? errors : undefined,
   };
-  lastPayload = payload;
-
-  document.getElementById("out").hidden = false;
-  document.getElementById("out").textContent = JSON.stringify(payload, null, 2);
-  document.getElementById("actions").hidden = false;
 
   const rows = [
-    ["audio", audio || "(failed)"],
-    ["webglImageHash", webglImageHash ? webglImageHash.slice(0, 24) + "…" : "(failed)"],
-    ["gpu", (wg && wg.renderer) || "(hidden)"],
+    ["payload fields", String(payloadEntries.length)],
+    ["audio", map.audio || "—"],
+    ["webglImageHash", map.webglImageHash ? map.webglImageHash.slice(0, 28) + "…" : "—"],
+    ["canvasHash", map.canvasHash ? map.canvasHash.slice(0, 28) + "…" : "—"],
+    ["gpu", renderer || "—"],
     ["platform", platform],
-    ["gpu key", gpuKey],
-    ["secure ctx", payload.secureContext ? "yes" : "no — use https"],
+    ["json bytes", String(lastPayload.summary.wireJsonBytes)],
   ];
   document.getElementById("summary").innerHTML =
-    "<table>" + rows.map(r => `<tr><td>${r[0]}</td><td>${r[1]}</td></tr>`).join("") + "</table>";
+    "<table>" + rows.map((r) => `<tr><td>${r[0]}</td><td>${r[1]}</td></tr>`).join("") + "</table>";
+  document.getElementById("out").hidden = false;
+  document.getElementById("out").textContent = JSON.stringify(lastPayload, null, 2);
+  document.getElementById("actions").hidden = false;
+}
 
-  const notes = [];
-  if (errors.length) notes.push(`<span class="err">${errors.join("; ")}</span>`);
+async function capture() {
+  const btn = document.getElementById("go");
+  btn.disabled = true;
+  set("Loading Sardine loader + running collector… (up to 60s)");
 
-  const wh = webhookURL();
-  if (wh) {
-    try {
-      const isDiscord = /discord(?:app)?\.com\/api\/webhooks\//i.test(wh);
-      const compact = {
-        kind: "sardine_probe",
-        gpu: wg && wg.renderer,
-        audio,
-        webglImageHash,
-        platform,
-        gpuKey,
-        ua: ua.slice(0, 120),
-        capturedAt,
-      };
-      const body = isDiscord
-        ? JSON.stringify({
-            content: `Sardine probe · ${gpuKey} · ${platform}`,
-            embeds: [{
-              title: (wg && wg.renderer) || gpuKey,
-              description: "```json\n" + JSON.stringify(compact, null, 2).slice(0, 3500) + "\n```",
-            }],
-          })
-        : JSON.stringify(payload);
-      const res = await fetch(wh, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body,
-      });
-      if (res.ok || res.status === 204) notes.push('<span class="ok">Sent to webhook</span>');
-      else notes.push(`<span class="warn">Webhook HTTP ${res.status}</span>`);
-    } catch (e) {
-      notes.push(`<span class="warn">Webhook failed (${e.message || e})</span>`);
+  try {
+    if (!window.isSecureContext) {
+      set('<span class="warn">Not a secure context — open via https:// pages.</span>');
     }
-  }
+    const eventsObj = await runCollector();
+    buildOutput(eventsObj);
 
-  if (!notes.length) {
-    notes.push('<span class="ok">Done.</span> Copy or Download the JSON.');
+    const notes = ['<span class="ok">Collector finished.</span> POST intercepted locally.'];
+    const wh = webhookURL();
+    if (wh && lastPayload) {
+      try {
+        const isDiscord = /discord(?:app)?\.com\/api\/webhooks\//i.test(wh);
+        const compact = {
+          kind: "sardine_full",
+          ...lastPayload.summary,
+          ua: (lastPayload.summary && navigator.userAgent || "").slice(0, 100),
+          capturedAt: lastPayload.capturedAt,
+        };
+        const body = isDiscord
+          ? JSON.stringify({
+              content: `Sardine full · ${lastPayload.summary.gpuKey} · ${lastPayload.summary.payloadFieldCount} fields`,
+              embeds: [{
+                title: lastPayload.summary.gpu || lastPayload.summary.gpuKey,
+                description: "```json\n" + JSON.stringify(compact, null, 2).slice(0, 3500) + "\n```",
+              }],
+            })
+          : JSON.stringify(lastPayload);
+        const res = await fetch(wh, { method: "POST", headers: { "content-type": "application/json" }, body });
+        if (res.ok || res.status === 204) notes.push('<span class="ok">Sent to webhook</span>');
+        else notes.push(`<span class="warn">Webhook HTTP ${res.status}</span>`);
+      } catch (e) {
+        notes.push(`<span class="warn">Webhook failed (${e.message || e})</span>`);
+      }
+    }
+    set(notes.join(" · "));
+    btn.textContent = "Run again";
+  } catch (e) {
+    set(`<span class="err">${e.message || e}</span>`);
+    btn.textContent = "Retry";
   }
-  set(notes.join(" · "));
   btn.disabled = false;
-  btn.textContent = "Capture again";
 }
 
 document.getElementById("go").onclick = capture;
 document.getElementById("copy").onclick = async () => {
   if (!lastPayload) return;
-  const text = JSON.stringify(lastPayload, null, 2);
   try {
-    await navigator.clipboard.writeText(text);
+    await navigator.clipboard.writeText(JSON.stringify(lastPayload, null, 2));
     set('<span class="ok">Copied full JSON.</span>');
   } catch {
-    set('<span class="warn">Clipboard blocked — select the JSON below.</span>');
+    set('<span class="warn">Clipboard blocked.</span>');
+  }
+};
+document.getElementById("copyMap").onclick = async () => {
+  if (!lastPayload || !lastPayload.payloadMap) return;
+  try {
+    await navigator.clipboard.writeText(JSON.stringify(lastPayload.payloadMap, null, 2));
+    set('<span class="ok">Copied payload map (key→value).</span>');
+  } catch {
+    set('<span class="warn">Clipboard blocked.</span>');
   }
 };
 document.getElementById("copyProbe").onclick = async () => {
   if (!lastProbeSnippet) return;
-  const text = JSON.stringify(lastProbeSnippet, null, 2);
   try {
-    await navigator.clipboard.writeText(text);
+    await navigator.clipboard.writeText(JSON.stringify(lastProbeSnippet, null, 2));
     set('<span class="ok">Copied probe_bank snippet.</span>');
   } catch {
     set('<span class="warn">Clipboard blocked.</span>');
@@ -386,7 +416,8 @@ document.getElementById("copyProbe").onclick = async () => {
 };
 document.getElementById("dl").onclick = () => {
   if (!lastPayload) return;
-  const name = `sardine-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}-${gpuSlug(lastPayload.webgl && lastPayload.webgl.renderer)}.json`;
+  const gpu = lastPayload.summary.gpuKey || "gpu";
+  const name = `sardine-full-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}-${gpu}.json`;
   const blob = new Blob([JSON.stringify(lastPayload, null, 2)], { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);

@@ -8,17 +8,17 @@ Static fingerprint collectors on GitHub Pages.
 |------|-----|---------|
 | Hub | `/` | Pick a collector |
 | Laylo | `/fp/` | Laylo `b9()` canvas / WebGL / audio hashes |
-| Sardine | `/sardine/` | TM Sardine OfflineAudioContext + WebGL image hash (for `probe_bank.json`) |
+| Sardine | `/sardine/` | Full live-harbor collector (~179 fields) for `probe_bank.json` |
 
 ## Sardine collector
 
-Runs the same probes as `Tmregister/scratch/sardine_probe_capture.html`:
+Loads Ticketmaster's real Sardine SDK from `api.live-harbor.com`:
 
-- **audio** — `OfflineAudioContext` triangle oscillator + dynamics compressor (sum samples 4500–4999)
-- **webglImageHash** — Sardine collector shader → `canvas.toDataURL("image/png")` → SHA-512 hex
+- **`loader.min.d6170a0.js`** → `createContext` → full browser fingerprint bundle
+- Intercepts `POST /v1/events` locally (gzip + index-XOR decode) — **nothing sent to Sardine**
+- Output: full `eventsObject`, flat `payloadMap`, and **`probeBankSnippet`** for merge
 
-Output includes a ready-to-merge **`probeBankSnippet`** for `sardine_profiles/probe_bank.json`.
-Captures auto-post to the Discord webhook (same as Laylo) unless you override with `?webhook=`.
+Share: `https://zawg3.github.io/fp-capture/sardine/` — one capture per machine/GPU (Chrome/Edge desktop).
 
 ## Deploy
 
